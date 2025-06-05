@@ -9,14 +9,20 @@ load_dotenv()
 
 def get_db_connection():
     try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            connect_timeout=5,
-        )
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            # Use DATABASE_URL for Neon or other cloud databases
+            conn = psycopg2.connect(database_url, sslmode="require", connect_timeout=5)
+        else:
+            # Fallback to individual parameters for local development
+            conn = psycopg2.connect(
+                dbname=os.getenv("DB_NAME"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                host=os.getenv("DB_HOST"),
+                port=os.getenv("DB_PORT"),
+                connect_timeout=5,
+            )
         return conn
     except psycopg2.Error as e:
         print(f"Error connecting to database: {e}")
@@ -270,9 +276,11 @@ def get_user_progress(user_id: int) -> List[Tuple[str, int, datetime | None, boo
                 ),
                 next_reminder AS (
                     SELECT topic_id, MIN(scheduled_time) as next_scheduled_time,
-                           MAX(CASE WHEN status IN ('SENT', 'AWAITING') THEN status ELSE NULL END) as status
+                           MAX(CASE WHEN status IN ('SENT', 'AWAITING', 'PENDING') THEN status ELSE NULL END) as status
                     FROM reminders
                     WHERE is_processed = FALSE
+                      AND status = 'PENDING'
+                      AND scheduled_time > NOW()
                     GROUP BY topic_id
                 )
                 SELECT t.title,
