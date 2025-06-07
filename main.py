@@ -1,6 +1,7 @@
 import os
 import pytz
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -12,13 +13,12 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, Conflict
 from dotenv import load_dotenv
 import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-import asyncio
 from fastapi import FastAPI
 import uvicorn
 import threading
@@ -582,6 +582,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Update {update} caused error {context.error}")
     if isinstance(context.error, TelegramError):
         logger.error(f"Telegram error: {context.error.message}")
+        if isinstance(context.error, Conflict):
+            logger.warning("Detected Conflict error, attempting to recover in 10 seconds")
+            try:
+                # Останавливаем текущий polling
+                if context.application.updater.running:
+                    await context.application.updater.stop()
+                await asyncio.sleep(10)
+                # Проверяем вебхук
+                webhook_info = await context.bot.get_webhook_info()
+                if webhook_info.url:
+                    logger.info("Removing webhook to ensure polling")
+                    await context.bot.delete_webhook()
+                # Перезапускаем polling
+                await context.application.updater.start_polling(drop_pending_updates=True)
+                logger.info("Polling restarted after Conflict error")
+                if update and update.message:
+                    await update.message.reply_text("Связь с Telegram восстановлена! Попробуйте снова.")
+            except Exception as e:
+                logger.error(f"Failed to recover from Conflict: {e}")
     try:
         if update and update.message:
             await update.message.reply_text("Произошла ошибка. Попробуйте снова.", reply_markup=main_menu())
@@ -650,16 +669,21 @@ async def main() -> None:
         threading.Thread(target=run_fastapi, daemon=True).start()
         await bot_app.initialize()
         await bot_app.start()
+        # Проверяем вебхук перед запуском polling
+        webhook_info = await bot_app.bot.get_webhook_info()
+        if webhook_info.url:
+            logger.info("Removing webhook to ensure polling mode")
+            await bot_app.bot.delete_webhook()
         logger.info("Application started")
-        await bot_app.updater.start_polling()
+        await bot_app.updater.start_polling(drop_pending_updates=True)
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(60)
     except Exception as e:
         logger.error(f"Error in main: {e}")
         raise
     finally:
         logger.info("Shutting down...")
-        if "bot_app" in locals():
+        if "bot_id" in locals():
             await bot_app.stop()
             await bot_app.shutdown()
         if "scheduler" in locals():
