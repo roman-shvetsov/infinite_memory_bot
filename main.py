@@ -41,6 +41,7 @@ TIMEZONES = [
     "Asia/Almaty",
     "America/New_York",
     "Asia/Tokyo",
+    "Asia/Yekaterinburg",
 ]
 
 # Расписание повторений
@@ -148,7 +149,6 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), status="PENDING")
         scheduler = context.bot_data.get("scheduler")
         job_id = f"reminder_{topic_id}_{reminder_id}"
-        # Убедимся, что задача с таким ID не существует
         if scheduler.get_job(job_id):
             logger.warning(f"Job {job_id} already exists, removing before adding new")
             scheduler.remove_job(job_id)
@@ -595,13 +595,13 @@ async def main() -> None:
         bot_token = os.getenv("BOT_TOKEN")
         if not bot_token:
             raise ValueError("BOT_TOKEN not found in .env")
-        app = Application.builder().token(bot_token).build()
+        bot_app = Application.builder().token(bot_token).build()
         scheduler = AsyncIOScheduler(timezone=pytz.UTC)
-        app.bot_data["scheduler"] = scheduler
+        bot_app.bot_data["scheduler"] = scheduler
         scheduler.add_job(
             process_overdue_reminders,
             IntervalTrigger(seconds=30),
-            args=[app],
+            args=[bot_app],
             id="overdue_reminder_check",
             timezone=pytz.UTC,
         )
@@ -637,21 +637,21 @@ async def main() -> None:
                 ],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
+            per_message=True,
         )
-        app.add_handler(conv_handler)
-        app.add_handler(CommandHandler("test", test_reminder))
-        app.add_handler(CallbackQueryHandler(handle_repeated, pattern=r"^repeated_.*$"))
-        app.add_error_handler(error_handler)
+        bot_app.add_handler(conv_handler)
+        bot_app.add_handler(CommandHandler("test", test_reminder))
+        bot_app.add_handler(CallbackQueryHandler(handle_repeated, pattern=r"^repeated_.*$"))
+        bot_app.add_error_handler(error_handler)
         scheduler.start()
-        # Запуск FastAPI в отдельном потоке
-        port = int(os.getenv("PORT", 8000))
+        port = int(os.getenv("PORT", 10000))
         def run_fastapi():
             uvicorn.run(app, host="0.0.0.0", port=port)
         threading.Thread(target=run_fastapi, daemon=True).start()
-        await app.initialize()
-        await app.start()
+        await bot_app.initialize()
+        await bot_app.start()
         logger.info("Application started")
-        await app.updater.start_polling()
+        await bot_app.updater.start_polling()
         while True:
             await asyncio.sleep(3600)
     except Exception as e:
@@ -659,9 +659,9 @@ async def main() -> None:
         raise
     finally:
         logger.info("Shutting down...")
-        if "app" in locals():
-            await app.stop()
-            await app.shutdown()
+        if "bot_app" in locals():
+            await bot_app.stop()
+            await bot_app.shutdown()
         if "scheduler" in locals():
             scheduler.shutdown()
 
