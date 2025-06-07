@@ -1,6 +1,6 @@
 import os
 import pytz
-from typing import List, Dict
+import logging
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -19,11 +19,22 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import asyncio
+from fastapi import FastAPI
+import uvicorn
+import threading
+
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Состояния ConversationHandler
 CHOOSE_TIMEZONE, ADD_TOPIC, DELETE_TOPIC, PAUSE_TOPIC, RESUME_TOPIC = range(5)
 
+# Доступные часовые пояса
 TIMEZONES = [
     "Europe/Moscow",
     "Europe/Kiev",
@@ -32,6 +43,7 @@ TIMEZONES = [
     "Asia/Tokyo",
 ]
 
+# Расписание повторений
 REPETITION_SCHEDULE = [
     timedelta(hours=1),
     timedelta(days=1),
@@ -39,6 +51,17 @@ REPETITION_SCHEDULE = [
     timedelta(days=7),
     timedelta(days=30),
 ]
+
+# FastAPI для /healthz
+app = FastAPI()
+
+@app.get("/healthz")
+async def health_check():
+    try:
+        with db.get_db_connection():
+            return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -54,13 +77,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id = user.id
     chat_id = update.effective_chat.id
-    print(f"Received /start from user {user_id} in chat {chat_id}")
+    logger.info(f"Received /start from user {user_id} in chat {chat_id}")
     try:
         timezone = db.get_user_timezone(user_id)
         db.add_user(user_id, user.username, user.first_name, timezone or "UTC", chat_id)
     except Exception as e:
-        print(f"Error in start for user {user_id}: {e}")
-        await update.message.reply_text("Ошибка базы данных. Пожалуйста, попробуйте позже.")
+        logger.error(f"Error in start for user {user_id}: {e}")
+        await update.message.reply_text("Ошибка базы данных. Попробуйте позже.")
         return ConversationHandler.END
     if not timezone:
         keyboard = [[InlineKeyboardButton(tz, callback_data=f"timezone_{tz}")] for tz in TIMEZONES]
@@ -80,7 +103,7 @@ async def choose_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     timezone = query.data.replace("timezone_", "")
     user = update.effective_user
     chat_id = update.effective_chat.id
-    print(f"User {user.id} selected timezone: {timezone} in chat {chat_id}")
+    logger.info(f"User {user.id} selected timezone: {timezone} in chat {chat_id}")
     try:
         db.add_user(user.id, user.username, user.first_name, timezone, chat_id)
         await query.message.reply_text(
@@ -88,12 +111,13 @@ async def choose_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return ConversationHandler.END
     except Exception as e:
-        print(f"Error saving timezone for user {user.id}: {e}")
+        logger.error(f"Error saving timezone for user {user.id}: {e}")
         await query.message.reply_text("Ошибка при сохранении часового пояса. Попробуйте снова.")
         return ConversationHandler.END
 
 async def add_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    print(f"User {update.effective_user.id} started adding topic")
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} started adding topic")
     await update.message.reply_text(
         "Напиши название темы (например, 'Рецепт котлет') 📝:",
         reply_markup=ReplyKeyboardMarkup([["Назад 🔙"]], resize_keyboard=True),
@@ -104,7 +128,7 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    print(f"User {user_id} adding topic: {text}")
+    logger.info(f"User {user_id} adding topic: {text}")
     if text == "Назад 🔙":
         await update.message.reply_text("Выбери действие:", reply_markup=main_menu())
         return ConversationHandler.END
@@ -115,34 +139,40 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         topic_id = db.add_topic(user_id, text)
         timezone = db.get_user_timezone(user_id)
         if not timezone:
-            await update.message.reply_text("Ошибка: не установлен часовой пояс. Пожалуйста, начни заново с /start.")
+            logger.error(f"No timezone set for user {user_id}")
+            await update.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
             return ConversationHandler.END
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
         first_reminder = now + REPETITION_SCHEDULE[0]
         reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), status="PENDING")
         scheduler = context.bot_data.get("scheduler")
+        job_id = f"reminder_{topic_id}_{reminder_id}"
+        # Убедимся, что задача с таким ID не существует
+        if scheduler.get_job(job_id):
+            logger.warning(f"Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
         scheduler.add_job(
             send_reminder,
             DateTrigger(run_date=first_reminder),
             args=[chat_id, topic_id, text, reminder_id, context, tz],
             timezone=tz,
-            id=f"reminder_{topic_id}_{reminder_id}",
+            id=job_id,
         )
-        print(f"Scheduled first reminder for topic_id {topic_id} at {first_reminder}")
+        logger.info(f"Scheduled first reminder for topic_id {topic_id} (reminder_id {reminder_id}) at {first_reminder} (timezone: {timezone})")
         await update.message.reply_text(
             f"Тема '{text}' добавлена! 📝 Первое напоминание придёт {first_reminder.strftime('%Y-%m-%d %H:%M')} 🕒",
             reply_markup=main_menu(),
         )
         return ConversationHandler.END
     except Exception as e:
-        print(f"Error adding topic for user {user_id}: {e}")
+        logger.error(f"Error adding topic for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при добавлении темы. Попробуйте снова.")
         return ConversationHandler.END
 
 async def delete_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    print(f"User {user_id} started deleting topic")
+    logger.info(f"User {user_id} started deleting topic")
     try:
         topics = db.get_all_topics(user_id)
         if not topics:
@@ -163,7 +193,7 @@ async def delete_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["back_message_sent"] = True
         return DELETE_TOPIC
     except Exception as e:
-        print(f"Error getting topics for user {user_id}: {e}")
+        logger.error(f"Error getting topics for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при получении списка тем. Попробуйте позже.")
         return ConversationHandler.END
 
@@ -176,7 +206,7 @@ async def delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     topic_id = int(query.data.replace("delete_", ""))
-    print(f"User {user_id} deleting topic: {topic_id}")
+    logger.info(f"User {user_id} deleting topic: {topic_id}")
     try:
         with db.get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -189,7 +219,7 @@ async def delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         for job in scheduler.get_jobs():
             if job.id.startswith(f"reminder_{topic_id}_"):
                 scheduler.remove_job(job.id)
-                print(f"Removed job {job.id} for topic {topic_id}")
+                logger.info(f"Removed job {job.id} for topic {topic_id}")
         db.delete_topic(topic_id)
         topics = db.get_all_topics(user_id)
         if not topics:
@@ -206,13 +236,13 @@ async def delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         return DELETE_TOPIC
     except Exception as e:
-        print(f"Error deleting topic {topic_id}: {e}")
+        logger.error(f"Error deleting topic {topic_id}: {e}")
         await query.message.reply_text("Ошибка при удалении темы. Попробуйте снова.")
         return DELETE_TOPIC
 
 async def pause_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    print(f"User {user_id} started pausing topic")
+    logger.info(f"User {user_id} started pausing topic")
     try:
         topics = db.get_active_topics(user_id)
         if not topics:
@@ -230,7 +260,7 @@ async def pause_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["back_message_sent"] = True
         return PAUSE_TOPIC
     except Exception as e:
-        print(f"Error getting active topics for user {user_id}: {e}")
+        logger.error(f"Error getting active topics for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при получении списка тем. Попробуйте позже.")
         return ConversationHandler.END
 
@@ -243,7 +273,7 @@ async def pause_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     query = update.callback_query
     await query.answer()
     topic_id = int(query.data.replace("pause_", ""))
-    print(f"User {user_id} pausing topic: {topic_id}")
+    logger.info(f"User {user_id} pausing topic: {topic_id}")
     try:
         with db.get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -266,13 +296,13 @@ async def pause_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return PAUSE_TOPIC
     except Exception as e:
-        print(f"Error pausing topic {topic_id}: {e}")
+        logger.error(f"Error pausing topic {topic_id}: {e}")
         await query.message.reply_text("Ошибка при приостановке темы. Попробуйте снова.")
         return PAUSE_TOPIC
 
 async def resume_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    print(f"User {user_id} started resuming topic")
+    logger.info(f"User {user_id} started resuming topic")
     try:
         topics = db.get_paused_topics(user_id)
         if not topics:
@@ -288,7 +318,7 @@ async def resume_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["back_message_sent"] = True
         return RESUME_TOPIC
     except Exception as e:
-        print(f"Error getting paused topics for user {user_id}: {e}")
+        logger.error(f"Error getting paused topics for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при получении списка тем. Попробуйте позже.")
         return ConversationHandler.END
 
@@ -302,7 +332,7 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     topic_id = int(query.data.replace("resume_", ""))
-    print(f"User {user_id} resuming topic: {topic_id}")
+    logger.info(f"User {user_id} resuming topic: {topic_id}")
     try:
         with db.get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -315,7 +345,8 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         db.resume_topic(topic_id)
         timezone = db.get_user_timezone(user_id)
         if not timezone:
-            await query.message.reply_text("Ошибка: не установлен часовой пояс. Пожалуйста, начни заново с /start.")
+            logger.error(f"No timezone set for user {user_id}")
+            await query.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
             return ConversationHandler.END
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
@@ -324,14 +355,18 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         topics = db.get_all_topics(user_id)
         title = next((t[1] for t in topics if t[0] == topic_id), "Тема")
         scheduler = context.bot_data.get("scheduler")
+        job_id = f"reminder_{topic_id}_{reminder_id}"
+        if scheduler.get_job(job_id):
+            logger.warning(f"Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
         scheduler.add_job(
             send_reminder,
             DateTrigger(run_date=first_reminder),
             args=[chat_id, topic_id, title, reminder_id, context, tz],
             timezone=tz,
-            id=f"reminder_{topic_id}_{reminder_id}",
+            id=job_id,
         )
-        print(f"Scheduled first reminder for resumed topic_id {topic_id} at {first_reminder}")
+        logger.info(f"Scheduled first reminder for resumed topic_id {topic_id} (reminder_id {reminder_id}) at {first_reminder} (timezone: {timezone})")
         topics = db.get_paused_topics(user_id)
         if not topics:
             await query.message.edit_text("Тема возобновлена! ▶️ У тебя больше нет приостановленных тем.")
@@ -344,13 +379,13 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         return RESUME_TOPIC
     except Exception as e:
-        print(f"Error resuming topic {topic_id}: {e}")
+        logger.error(f"Error resuming topic {topic_id}: {e}")
         await query.message.reply_text("Ошибка при возобновлении темы. Попробуйте снова.")
         return RESUME_TOPIC
 
 async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    print(f"User {user_id} requested progress")
+    logger.info(f"User {user_id} requested progress")
     try:
         progress = db.get_user_progress(user_id)
         if not progress:
@@ -378,27 +413,36 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for message in messages:
             await update.message.reply_text(message, reply_markup=main_menu())
     except Exception as e:
-        print(f"Error getting progress for user {user_id}: {e}")
+        logger.error(f"Error getting progress for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при получении прогресса. Попробуйте позже.", reply_markup=main_menu())
 
 async def send_reminder(
     chat_id: int, topic_id: int, topic_title: str, reminder_id: int, context: ContextTypes.DEFAULT_TYPE, tz: pytz.timezone
 ) -> None:
-    print(f"Sending reminder for topic {topic_id} (reminder_id {reminder_id}) to chat {chat_id}")
+    logger.info(f"Attempting to send reminder for topic {topic_id} (reminder_id {reminder_id}) to chat {chat_id}")
     try:
-        if db.is_reminder_processed(reminder_id):
-            print(f"Reminder {reminder_id} already processed, skipping")
-            return
+        with db.get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM reminders WHERE reminder_id = %s", (reminder_id,)
+                )
+                result = cur.fetchone()
+                if not result or result[0] in ("SENT", "PROCESSED"):
+                    logger.info(f"Reminder {reminder_id} already sent or processed, skipping")
+                    return
+                cur.execute(
+                    "UPDATE reminders SET status = 'SENT' WHERE reminder_id = %s", (reminder_id,)
+                )
+                conn.commit()
         short_title = (topic_title[:97] + "...") if len(topic_title) > 97 else topic_title
         text = f"Пора повторить тему '{short_title}'! 📚"
         keyboard = [[InlineKeyboardButton("Повторил ✅", callback_data=f"repeated_{topic_id}_{reminder_id}")]]
         await context.bot.send_message(
             chat_id=chat_id, text=text.strip(), reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        db.mark_reminder_sent(reminder_id)
-        print(f"Reminder {reminder_id} sent to chat {chat_id}")
+        logger.info(f"Reminder {reminder_id} successfully sent to chat {chat_id}")
     except Exception as e:
-        print(f"Error sending reminder {reminder_id} to chat {chat_id}: {e}")
+        logger.error(f"Error sending reminder {reminder_id} to chat {chat_id}: {e}")
 
 async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -408,14 +452,24 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         topic_id, reminder_id = int(topic_id), int(reminder_id)
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
-        print(f"User {user_id} marked reminder as repeated: {topic_id}_{reminder_id}")
-        if db.is_reminder_processed(reminder_id):
-            await query.message.reply_text("Это напоминание уже обработано! 😊")
-            return
-        db.mark_reminder_processed(reminder_id)
+        logger.info(f"User {user_id} marked reminder as repeated: {topic_id}_{reminder_id}")
+        with db.get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM reminders WHERE reminder_id = %s", (reminder_id,)
+                )
+                result = cur.fetchone()
+                if not result or result[0] == "PROCESSED":
+                    await query.message.reply_text("Это напоминание уже обработано! 😊")
+                    return
+                cur.execute(
+                    "UPDATE reminders SET status = 'PROCESSED' WHERE reminder_id = %s", (reminder_id,)
+                )
+                conn.commit()
         timezone = db.get_user_timezone(user_id)
         if not timezone:
-            await query.message.reply_text("Ошибка: не установлен часовой пояс. Пожалуйста, начни заново с /start.")
+            logger.error(f"No timezone set for user {user_id}")
+            await query.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
             return
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
@@ -427,14 +481,18 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             title = next((t[1] for t in topics if t[0] == topic_id), "Тема")
             new_reminder_id = db.schedule_reminder(topic_id, next_time.astimezone(pytz.UTC), status="PENDING")
             scheduler = context.bot_data.get("scheduler")
+            job_id = f"reminder_{topic_id}_{new_reminder_id}"
+            if scheduler.get_job(job_id):
+                logger.warning(f"Job {job_id} already exists, removing before adding new")
+                scheduler.remove_job(job_id)
             scheduler.add_job(
                 send_reminder,
                 DateTrigger(run_date=next_time),
                 args=[chat_id, topic_id, title, new_reminder_id, context, tz],
                 timezone=tz,
-                id=f"reminder_{topic_id}_{new_reminder_id}",
+                id=job_id,
             )
-            print(f"Scheduled next reminder for topic {topic_id} at {next_time}")
+            logger.info(f"Scheduled next reminder for topic {topic_id} (reminder_id {new_reminder_id}) at {next_time} (timezone: {timezone})")
             await query.message.reply_text(
                 f"Молодец, что повторил! 💪 Следующее напоминание придёт: {next_time.strftime('%Y-%m-%d %H:%M')} 🕒"
             )
@@ -442,14 +500,14 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Поздравляю, ты освоил эту тему! 🎉")
         await query.message.edit_reply_markup(reply_markup=None)
     except Exception as e:
-        print(f"Error processing repetition for reminder {reminder_id}: {e}")
+        logger.error(f"Error processing repetition for reminder {reminder_id}: {e}")
         await query.message.reply_text("Ошибка при обработке напоминания. Попробуйте снова.")
 
 async def process_overdue_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
-    print("Checking for overdue reminders")
+    logger.info("Checking for overdue reminders")
     try:
         reminders = db.get_overdue_reminders()
-        print(f"Found {len(reminders)} overdue reminders")
+        logger.info(f"Found {len(reminders)} overdue reminders")
         for reminder in reminders:
             reminder_id = reminder["reminder_id"]
             topic_id = reminder["topic_id"]
@@ -459,14 +517,23 @@ async def process_overdue_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             scheduled_time = reminder["scheduled_time"]
             delay = datetime.now(pytz.UTC) - scheduled_time
             delay_minutes = int(delay.total_seconds() // 60)
-            print(f"Processing overdue reminder_id {reminder_id} for topic {topic_id} (user {user_id}), scheduled for {scheduled_time}, delayed by {delay_minutes} minutes")
+            logger.info(f"Processing overdue reminder_id {reminder_id} for topic {topic_id} (user {user_id}), scheduled for {scheduled_time}, delayed by {delay_minutes} minutes")
             if chat_id:
+                with db.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT status FROM reminders WHERE reminder_id = %s", (reminder_id,)
+                        )
+                        result = cur.fetchone()
+                        if not result or result[0] in ("SENT", "PROCESSED"):
+                            logger.info(f"Reminder {reminder_id} already sent or processed, skipping")
+                            continue
                 timezone = db.get_user_timezone(user_id)
                 if timezone:
                     tz = pytz.timezone(timezone)
                     await send_reminder(chat_id, topic_id, title, reminder_id, context, tz)
     except Exception as e:
-        print(f"Error processing overdue reminders: {e}")
+        logger.error(f"Error processing overdue reminders: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Действие отменено. Выбери действие:", reply_markup=main_menu())
@@ -476,7 +543,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    print(f"User {user_id} triggered /test in chat {chat_id}")
+    logger.info(f"User {user_id} triggered /test in chat {chat_id}")
     try:
         topics = db.get_active_topics(user_id)
         if not topics:
@@ -486,36 +553,43 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         topic_id, title = topics[0]
         timezone = db.get_user_timezone(user_id)
-        tz = pytz.timezone(timezone) if timezone else pytz.UTC
+        if not timezone:
+            logger.error(f"No timezone set for user {user_id}")
+            await update.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
+            return
+        tz = pytz.timezone(timezone)
         test_time = datetime.now(tz) + timedelta(seconds=10)
         reminder_id = db.schedule_reminder(topic_id, test_time.astimezone(pytz.UTC), status="TESTING")
-        print(f"Created test reminder_id {reminder_id} for topic_id {topic_id} at {test_time}")
         scheduler = context.bot_data.get("scheduler")
+        job_id = f"reminder_{topic_id}_{reminder_id}"
+        if scheduler.get_job(job_id):
+            logger.warning(f"Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
         scheduler.add_job(
             send_reminder,
             DateTrigger(run_date=test_time),
             args=[chat_id, topic_id, title, reminder_id, context, tz],
             timezone=tz,
-            id=f"reminder_{topic_id}_{reminder_id}",
+            id=job_id,
         )
-        print(f"Scheduled test reminder for topic_id {topic_id} at {test_time}")
+        logger.info(f"Scheduled test reminder for topic_id {topic_id} (reminder_id {reminder_id}) at {test_time} (timezone: {timezone})")
         await update.message.reply_text("Тестовое напоминание запланировано через 10 секунд!", reply_markup=main_menu())
     except Exception as e:
-        print(f"Error in test_reminder for user {user_id}: {e}")
+        logger.error(f"Error in test_reminder for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при создании тестового напоминания.", reply_markup=main_menu())
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"Update {update} caused error {context.error}")
+    logger.error(f"Update {update} caused error {context.error}")
     if isinstance(context.error, TelegramError):
-        print(f"Telegram error: {context.error.message}")
+        logger.error(f"Telegram error: {context.error.message}")
     try:
         if update and update.message:
             await update.message.reply_text("Произошла ошибка. Попробуйте снова.", reply_markup=main_menu())
     except Exception as e:
-        print(f"Error sending error message: {e}")
+        logger.error(f"Error sending error message: {e}")
 
 async def main() -> None:
-    print("Starting bot...")
+    logger.info("Starting bot...")
     try:
         db.init_db()
         bot_token = os.getenv("BOT_TOKEN")
@@ -569,17 +643,22 @@ async def main() -> None:
         app.add_handler(CallbackQueryHandler(handle_repeated, pattern=r"^repeated_.*$"))
         app.add_error_handler(error_handler)
         scheduler.start()
+        # Запуск FastAPI в отдельном потоке
+        port = int(os.getenv("PORT", 8000))
+        def run_fastapi():
+            uvicorn.run(app, host="0.0.0.0", port=port)
+        threading.Thread(target=run_fastapi, daemon=True).start()
         await app.initialize()
         await app.start()
-        print("Application started")
+        logger.info("Application started")
         await app.updater.start_polling()
         while True:
             await asyncio.sleep(3600)
     except Exception as e:
-        print(f"Error in main: {e}")
+        logger.error(f"Error in main: {e}")
         raise
     finally:
-        print("Shutting down...")
+        logger.info("Shutting down...")
         if "app" in locals():
             await app.stop()
             await app.shutdown()
@@ -587,5 +666,5 @@ async def main() -> None:
             scheduler.shutdown()
 
 if __name__ == "__main__":
-    print("Starting bot...")
+    logger.info("Starting bot...")
     asyncio.run(main())

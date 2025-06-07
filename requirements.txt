@@ -1,5 +1,1 @@
-python-telegram-bot==21.6
-psycopg2-binary==2.9.9
-python-dotenv==1.0.1
-pytz==2024.2
-apscheduler==3.10.4
+python-telegram-bot==21.6 psycopg2-binary==2.9.9 python-dotenv==1.0.1 pytz==2024.1 apscheduler==3.10.4 fastapi==0.115.2 uvicorn==0.32.0
