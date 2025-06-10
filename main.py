@@ -49,13 +49,15 @@ TIMEZONES = [
     "Asia/Yekaterinburg",
 ]
 
-# Расписание повторений
+# Расписание повторений по кривой забывания
 REPETITION_SCHEDULE = [
-    timedelta(hours=1),
-    timedelta(days=1),
-    timedelta(days=4),
-    timedelta(days=7),
-    timedelta(days=30),
+    timedelta(hours=1),      # 1 час
+    timedelta(days=1),       # 1 день
+    timedelta(days=4),       # 4 дня
+    timedelta(days=7),       # 7 дней
+    timedelta(days=30),      # 1 месяц
+    timedelta(days=90),      # 3 месяца
+    timedelta(days=180),     # 6 месяцев
 ]
 
 # FastAPI для /healthz
@@ -153,7 +155,7 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
         first_reminder = now + REPETITION_SCHEDULE[0]
-        reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), status="PENDING")
+        reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), repetition_count=0)
         scheduler = context.bot_data.get("scheduler")
         job_id = f"reminder_{topic_id}_{reminder_id}"
         if scheduler.get_job(job_id):
@@ -358,7 +360,7 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
         first_reminder = now + REPETITION_SCHEDULE[0]
-        reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), status="PENDING")
+        reminder_id = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), repetition_count=0)
         topics = db.get_all_topics(user_id)
         title = next((t[1] for t in topics if t[0] == topic_id), "Тема")
         scheduler = context.bot_data.get("scheduler")
@@ -438,7 +440,7 @@ async def send_reminder(
                     logger.info(f"Instance {INSTANCE_ID}: Reminder {reminder_id} already sent or processed, skipping")
                     return
                 cur.execute(
-                    "UPDATE reminders SET status = 'SENT' WHERE reminder_id = %s", (reminder_id,)
+                    "UPDATE reminders SET status = 'SENT', sent_time = NOW() WHERE reminder_id = %s", (reminder_id,)
                 )
                 conn.commit()
         short_title = (topic_title[:97] + "...") if len(topic_title) > 97 else topic_title
@@ -463,14 +465,15 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with db.get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status FROM reminders WHERE reminder_id = %s", (reminder_id,)
+                    "SELECT status, repetition_count FROM reminders WHERE reminder_id = %s", (reminder_id,)
                 )
                 result = cur.fetchone()
                 if not result or result[0] == "PROCESSED":
                     await query.message.reply_text("Это напоминание уже обработано! 😊")
                     return
+                repetition_count = result[1]
                 cur.execute(
-                    "UPDATE reminders SET status = 'PROCESSED' WHERE reminder_id = %s", (reminder_id,)
+                    "UPDATE reminders SET status = 'PROCESSED', is_processed = TRUE WHERE reminder_id = %s", (reminder_id,)
                 )
                 conn.commit()
         timezone = db.get_user_timezone(user_id)
@@ -480,13 +483,12 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
-        repetition_count = db.get_reminder_repetition_count(reminder_id)
-        if repetition_count + 1 < len(REPETITION_SCHEDULE):
-            next_repetition = repetition_count + 1
+        next_repetition = repetition_count + 1
+        if next_repetition < len(REPETITION_SCHEDULE):
             next_time = now + REPETITION_SCHEDULE[next_repetition]
             topics = db.get_active_topics(user_id)
             title = next((t[1] for t in topics if t[0] == topic_id), "Тема")
-            new_reminder_id = db.schedule_reminder(topic_id, next_time.astimezone(pytz.UTC), status="PENDING")
+            new_reminder_id = db.schedule_reminder(topic_id, next_time.astimezone(pytz.UTC), repetition_count=next_repetition)
             scheduler = context.bot_data.get("scheduler")
             job_id = f"reminder_{topic_id}_{new_reminder_id}"
             if scheduler.get_job(job_id):
@@ -567,7 +569,7 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         tz = pytz.timezone(timezone)
         test_time = datetime.now(tz) + timedelta(seconds=10)
-        reminder_id = db.schedule_reminder(topic_id, test_time.astimezone(pytz.UTC), status="TESTING")
+        reminder_id = db.schedule_reminder(topic_id, test_time.astimezone(pytz.UTC), repetition_count=0, status="TESTING")
         scheduler = context.bot_data.get("scheduler")
         job_id = f"reminder_{topic_id}_{reminder_id}"
         if scheduler.get_job(job_id):
@@ -666,7 +668,7 @@ async def main() -> None:
                 ],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
-            per_message=False,  # Отключаем per_message для совместимости
+            per_message=False,
         )
         bot_app.add_handler(conv_handler)
         bot_app.add_handler(CommandHandler("test", test_reminder))

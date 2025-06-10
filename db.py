@@ -2,8 +2,15 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Tuple
 import os
+import logging
 from dotenv import load_dotenv
 from datetime import datetime
+
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -25,7 +32,7 @@ def get_db_connection():
             )
         return conn
     except psycopg2.Error as e:
-        print(f"Error connecting to database: {e}")
+        logger.error(f"Error connecting to database: {e}")
         raise
 
 def init_db() -> None:
@@ -61,7 +68,7 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS idx_topics_user_id ON topics(user_id);
             """)
             conn.commit()
-            print("Database tables initialized successfully")
+            logger.info("Database tables initialized successfully")
 
 def add_user(user_id: int, username: str, firstname: str, timezone: str, chat_id: int = None) -> None:
     with get_db_connection() as conn:
@@ -79,6 +86,7 @@ def add_user(user_id: int, username: str, firstname: str, timezone: str, chat_id
                 (user_id, username, firstname, timezone, chat_id),
             )
             conn.commit()
+            logger.info(f"User {user_id} added/updated with timezone {timezone}")
 
 def get_user_timezone(user_id: int) -> str | None:
     with get_db_connection() as conn:
@@ -103,6 +111,7 @@ def add_topic(user_id: int, title: str) -> int:
             )
             topic_id = cur.fetchone()[0]
             conn.commit()
+            logger.info(f"Topic '{title}' added for user {user_id} with topic_id {topic_id}")
             return topic_id
 
 def schedule_reminder(topic_id: int, scheduled_time: datetime, repetition_count: int = 0, status: str = "PENDING") -> int:
@@ -118,7 +127,7 @@ def schedule_reminder(topic_id: int, scheduled_time: datetime, repetition_count:
             )
             reminder_id = cur.fetchone()[0]
             conn.commit()
-            print(f"Reminder scheduled for topic {topic_id} with reminder_id {reminder_id}, status {status}")
+            logger.info(f"Reminder scheduled for topic_id {topic_id} (reminder_id {reminder_id}, repetition_count={repetition_count}, status={status})")
             return reminder_id
 
 def mark_reminder_processed(reminder_id: int) -> None:
@@ -129,7 +138,7 @@ def mark_reminder_processed(reminder_id: int) -> None:
                 (reminder_id,),
             )
             conn.commit()
-            print(f"Reminder {reminder_id} marked as processed")
+            logger.info(f"Reminder {reminder_id} marked as processed")
 
 def mark_reminder_sent(reminder_id: int) -> None:
     with get_db_connection() as conn:
@@ -139,7 +148,7 @@ def mark_reminder_sent(reminder_id: int) -> None:
                 (reminder_id,),
             )
             conn.commit()
-            print(f"Reminder {reminder_id} marked as sent")
+            logger.info(f"Reminder {reminder_id} marked as sent")
 
 def is_reminder_processed(reminder_id: int) -> bool:
     with get_db_connection() as conn:
@@ -187,7 +196,7 @@ def get_overdue_reminders() -> List[dict]:
                 """
             )
             reminders = cur.fetchall()
-            print(f"Overdue reminders: {len(reminders)}")
+            logger.info(f"Overdue reminders: {len(reminders)}")
             return reminders
 
 def update_awaiting_reminders() -> None:
@@ -205,7 +214,7 @@ def update_awaiting_reminders() -> None:
             updated = cur.rowcount
             conn.commit()
             if updated > 0:
-                print(f"Updated {updated} reminders to AWAITING status")
+                logger.info(f"Updated {updated} reminders to AWAITING status")
 
 def clear_unprocessed_reminders(topic_id: int) -> None:
     with get_db_connection() as conn:
@@ -215,7 +224,7 @@ def clear_unprocessed_reminders(topic_id: int) -> None:
                 (topic_id,),
             )
             conn.commit()
-            print(f"Cleared unprocessed reminders for topic {topic_id}")
+            logger.info(f"Cleared unprocessed reminders for topic {topic_id}")
 
 def delete_topic(topic_id: int) -> None:
     with get_db_connection() as conn:
@@ -223,24 +232,27 @@ def delete_topic(topic_id: int) -> None:
             cur.execute("DELETE FROM reminders WHERE topic_id = %s", (topic_id,))
             cur.execute("DELETE FROM topics WHERE topic_id = %s", (topic_id,))
             conn.commit()
+            logger.info(f"Deleted topic {topic_id} and its reminders")
 
 def pause_topic(topic_id: int) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE topics SET is_paused = TRUE WHERE topic_id = %s", (topic_id,))
             conn.commit()
+            logger.info(f"Paused topic {topic_id}")
 
 def resume_topic(topic_id: int) -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE topics SET is_paused = FALSE WHERE topic_id = %s", (topic_id,))
             conn.commit()
+            logger.info(f"Resumed topic {topic_id}")
 
 def get_all_topics(user_id: int) -> List[Tuple[int, str, bool]]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT topic_id, title, is_paused FROM topics WHERE user_id = %s",
+                "SELECT topic_id, title, is_paused FROM topics WHERE user_id = %s ORDER BY topic_id",
                 (user_id,),
             )
             return [(row[0], row[1], row[2]) for row in cur.fetchall()]
@@ -249,7 +261,7 @@ def get_active_topics(user_id: int) -> List[Tuple[int, str]]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT topic_id, title FROM topics WHERE user_id = %s AND is_paused = FALSE",
+                "SELECT topic_id, title FROM topics WHERE user_id = %s AND is_paused = FALSE ORDER BY topic_id",
                 (user_id,),
             )
             return [(row[0], row[1]) for row in cur.fetchall()]
@@ -258,38 +270,39 @@ def get_paused_topics(user_id: int) -> List[Tuple[int, str]]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT topic_id, title FROM topics WHERE user_id = %s AND is_paused = TRUE",
+                "SELECT topic_id, title FROM topics WHERE user_id = %s AND is_paused = TRUE ORDER BY topic_id",
                 (user_id,),
             )
             return [(row[0], row[1]) for row in cur.fetchall()]
 
-def get_user_progress(user_id: int) -> List[Tuple[str, int, datetime | None, bool, str]]:
+def get_user_progress(user_id: int) -> List[Tuple[str, int, datetime | None, None, bool, str]]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                WITH latest_reminders AS (
-                    SELECT topic_id, MAX(repetition_count) + 1 as max_repetition
+                WITH processed_reminders AS (
+                    SELECT topic_id, COUNT(*) as repetitions
                     FROM reminders
-                    WHERE status IN ('SENT', 'AWAITING', 'PROCESSED')
+                    WHERE status = 'PROCESSED'
                     GROUP BY topic_id
                 ),
                 next_reminder AS (
-                    SELECT topic_id, MIN(scheduled_time) as next_scheduled_time,
-                           MAX(CASE WHEN status IN ('SENT', 'AWAITING', 'PENDING') THEN status ELSE NULL END) as status
+                    SELECT topic_id,
+                           MIN(scheduled_time) as next_scheduled_time,
+                           MAX(status) as status
                     FROM reminders
                     WHERE is_processed = FALSE
-                      AND status = 'PENDING'
+                      AND status IN ('PENDING', 'SENT')
                       AND scheduled_time > NOW()
                     GROUP BY topic_id
                 )
                 SELECT t.title,
-                       COALESCE(lr.max_repetition, 0) AS repetitions,
+                       COALESCE(pr.repetitions, 0) AS repetitions,
                        nr.next_scheduled_time,
                        t.is_paused,
-                       COALESCE(nr.status, 'PENDING') AS status
+                       COALESCE(nr.status, 'NO_PENDING') AS status
                 FROM topics t
-                LEFT JOIN latest_reminders lr ON t.topic_id = lr.topic_id
+                LEFT JOIN processed_reminders pr ON t.topic_id = pr.topic_id
                 LEFT JOIN next_reminder nr ON t.topic_id = nr.topic_id
                 WHERE t.user_id = %s
                 ORDER BY t.topic_id
