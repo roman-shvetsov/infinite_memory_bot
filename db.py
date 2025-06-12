@@ -220,6 +220,26 @@ def get_overdue_reminders() -> List[dict]:
             logger.info(f"Retrieved {len(reminders)} overdue reminders")
             return reminders
 
+def get_all_pending_reminders() -> List[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    r.reminder_id, r.topic_id, t.user_id, t.title, r.scheduled_time,
+                    r.repetition_count, u.chat_id
+                FROM reminders r
+                JOIN topics t ON r.topic_id = t.topic_id
+                JOIN users u ON t.user_id = u.user_id
+                WHERE r.is_processed = FALSE
+                AND r.status = 'PENDING'
+                AND r.scheduled_time >= NOW()
+                """
+            )
+            reminders = cur.fetchall()
+            logger.info(f"Retrieved {len(reminders)} pending reminders")
+            return reminders
+
 def update_awaiting_reminders() -> None:
     with get_db_connection() as conn:
         with conn.cursor() as cur:

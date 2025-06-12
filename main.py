@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError, Conflict
+from telegram.error import TelegramError, Conflict, NetworkError
 from dotenv import load_dotenv
 import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -27,6 +27,8 @@ import uuid
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("telegram").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -123,7 +125,7 @@ async def add_topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     logger.info(f"Instance {INSTANCE_ID}: User {user_id} started adding topic")
     await update.message.reply_text(
-        "Напиши название темы (например, 'Рецепт котлет') 📝:",
+        "Напиши название темы (например, 'История древнего Рима') 📝:",
         reply_markup=ReplyKeyboardMarkup([["Назад 🔙"]], resize_keyboard=True),
     )
     return ADD_TOPIC
@@ -138,6 +140,9 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     if not text:
         await update.message.reply_text("Название темы не может быть пустым! Попробуй снова 📝:")
+        return ADD_TOPIC
+    if len(text) > 100:
+        await update.message.reply_text("Название темы слишком длинное! Максимум 100 символов.")
         return ADD_TOPIC
     try:
         topic_id = db.add_topic(user_id, text)
@@ -460,6 +465,7 @@ async def send_reminder(
         logger.error(f"Instance {INSTANCE_ID}: Error sending reminder {reminder_id} to chat {chat_id}: {e}")
 
 async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Instance {INSTANCE_ID}: Received callback query: {update.callback_query.data}")
     query = update.callback_query
     await query.answer()
     try:
@@ -497,7 +503,6 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             next_time = now + REPETITION_SCHEDULE[next_repetition]
             topics = db.get_all_topics(user_id)
             title = next((t[1] for t in topics if t[0] == topic_id), "Тема")
-            # Check for duplicate pending reminders
             with db.get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -530,8 +535,8 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Поздравляю, ты освоил эту тему! 🎉")
         await query.message.edit_reply_markup(reply_markup=None)
     except Exception as e:
-        logger.error(f"Instance {INSTANCE_ID}: Error processing repetition for reminder {reminder_id}: {e}")
-        await query.message.reply_text("Ошибка при обработке напоминания. Попробуйте снова.")
+        logger.error(f"Instance {INSTANCE_ID}: Error processing callback query {query.data}: {e}")
+        await query.message.reply_text("Ошибка при обработке кнопки. Попробуйте снова.")
 
 async def process_overdue_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Instance {INSTANCE_ID}: Checking for overdue reminders")
@@ -592,7 +597,6 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         tz = pytz.timezone(timezone)
         test_time = datetime.now(tz) + timedelta(seconds=10)
-        # Use the next repetition count for the test
         next_repetition = current_repetition + 1 if current_repetition < len(REPETITION_SCHEDULE) - 1 else current_repetition
         reminder_id = db.schedule_reminder(topic_id, test_time.astimezone(pytz.UTC), repetition_count=next_repetition, status="TESTING")
         scheduler = context.bot_data.get("scheduler")
@@ -613,9 +617,30 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Instance {INSTANCE_ID}: Error in test_reminder for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при создании тестового напоминания.", reply_markup=main_menu())
 
+async def restart_polling(bot_app):
+    logger.info(f"Instance {INSTANCE_ID}: Attempting to restart polling")
+    try:
+        await bot_app.updater.stop()
+        await asyncio.sleep(5)
+        await bot_app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            timeout=20,
+            poll_interval=1.0
+        )
+        logger.info(f"Instance {INSTANCE_ID}: Polling restarted successfully")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Failed to restart polling: {e}")
+        await asyncio.sleep(60)
+        await restart_polling(bot_app)
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Instance {INSTANCE_ID}: Update {update} caused error {context.error}")
-    if isinstance(context.error, TelegramError):
+    if isinstance(context.error, NetworkError):
+        logger.warning(f"Instance {INSTANCE_ID}: Network error, retrying in 60 seconds")
+        await asyncio.sleep(60)
+        await restart_polling(context.application)
+    elif isinstance(context.error, TelegramError):
         logger.error(f"Instance {INSTANCE_ID}: Telegram error: {context.error.message}")
         if isinstance(context.error, Conflict):
             logger.warning(f"Instance {INSTANCE_ID}: Detected Conflict error, attempting to recover in 5 seconds")
@@ -630,7 +655,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     await context.bot.delete_webhook()
                 await context.application.updater.start_polling(
                     drop_pending_updates=True,
-                    allowed_updates=["message", "callback_query"]
+                    allowed_updates=["message", "callback_query"],
+                    timeout=20,
+                    poll_interval=1.0
                 )
                 logger.info(f"Instance {INSTANCE_ID}: Polling restarted after Conflict error")
                 if update and update.effective_message:
@@ -644,6 +671,31 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text("Произошла ошибка. Попробуйте снова.", reply_markup=main_menu())
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Error sending error message: {e}")
+
+async def restore_scheduled_reminders(scheduler, bot_app):
+    try:
+        reminders = db.get_all_pending_reminders()
+        for reminder in reminders:
+            reminder_id = reminder["reminder_id"]
+            topic_id = reminder["topic_id"]
+            user_id = reminder["user_id"]
+            title = reminder["title"]
+            scheduled_time = reminder["scheduled_time"]
+            chat_id = reminder["chat_id"]
+            timezone = db.get_user_timezone(user_id)
+            tz = pytz.timezone(timezone) if timezone else pytz.UTC
+            job_id = f"reminder_{topic_id}_{reminder_id}"
+            if not scheduler.get_job(job_id):
+                scheduler.add_job(
+                    send_reminder,
+                    DateTrigger(run_date=scheduled_time),
+                    args=[chat_id, topic_id, title, reminder_id, bot_app, tz],
+                    timezone=tz,
+                    id=job_id
+                )
+                logger.info(f"Instance {INSTANCE_ID}: Restored reminder {reminder_id} for topic {topic_id}")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Error restoring reminders: {e}")
 
 async def main() -> None:
     logger.info(f"Instance {INSTANCE_ID}: Starting bot...")
@@ -702,6 +754,7 @@ async def main() -> None:
         bot_app.add_error_handler(error_handler)
         scheduler.start()
         logger.info(f"Instance {INSTANCE_ID}: Scheduler started")
+        await restore_scheduled_reminders(scheduler, bot_app)
         port = int(os.getenv("PORT", 8000))
         def run_fastapi():
             logger.info(f"Instance {INSTANCE_ID}: Starting FastAPI on port {port}")
@@ -714,7 +767,12 @@ async def main() -> None:
             logger.info(f"Instance {INSTANCE_ID}: Removing webhook {webhook_info.url}")
             await bot_app.bot.delete_webhook(drop_pending_updates=True)
         logger.info(f"Instance {INSTANCE_ID}: Application started")
-        await bot_app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+        await bot_app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            timeout=20,
+            poll_interval=1.0
+        )
         logger.info(f"Instance {INSTANCE_ID}: Polling started")
         while True:
             await asyncio.sleep(60)
