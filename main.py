@@ -417,7 +417,7 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         timezone: Optional[str] = db.get_user_timezone(user_id)
         tz = pytz.timezone(timezone) if timezone else pytz.UTC
         for i, (title, repetitions, next_reminder, is_paused, status) in enumerate(progress, 1):
-            short_title = (title[:97] + "...") if len(title) > 100 else title
+            short_title = (title[:497] + "...") if len(title) > 500 else title
             status_text = " (на паузе)" if is_paused else " (в ожидании)" if status == "AWAITING" else ""
             next_time = (
                 next_reminder.astimezone(tz).strftime("%Y-%m-%d %H:%M")
