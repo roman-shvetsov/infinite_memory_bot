@@ -424,7 +424,7 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 if next_reminder and not is_paused and status != "AWAITING"
                 else "Нет напоминаний"
             )
-            line = f"{i}. {short_title}{status_text}: {repetitions} повторений, следующее — {next_time} 🕒\n"
+            line = f"{i}. {short_title}{status_text}: {repetitions} повторений, следующее — {next_time} 🕒\n\n"
             if len(current_message + line) > 4000:
                 messages.append(current_message)
                 current_message = ""
