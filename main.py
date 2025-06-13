@@ -142,8 +142,8 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not text:
         await update.message.reply_text("Название темы не может быть пустым! Попробуй снова 📝:")
         return ADD_TOPIC
-    if len(text) > 100:
-        await update.message.reply_text("Название темы слишком длинное! Максимум 100 символов.")
+    if len(text) > 500:
+        await update.message.reply_text("Название темы слишком длинное! Максимум 500 символов.")
         return ADD_TOPIC
     try:
         topic_id: int = db.add_topic(user_id, text)
