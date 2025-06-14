@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError, Conflict, NetworkError
+from telegram.error import TelegramError, Conflict  # Убрали NetworkError, используем TelegramError
 from dotenv import load_dotenv
 import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -49,13 +49,13 @@ TIMEZONES = [
 ]
 
 REPETITION_SCHEDULE = [
-    timedelta(hours=1),    # Первое напоминание через 1 час
-    timedelta(days=1),     # Второе напоминание через 1 день
-    timedelta(days=4),     # Третье напоминание через 4 дня
-    timedelta(days=7),     # Четвёртое напоминание через 7 дней
-    timedelta(days=30),    # Пятое напоминание через 30 дней
-    timedelta(days=90),    # Шестое напоминание через 90 дней
-    timedelta(days=180),   # Седьмое напоминание через 180 дней
+    timedelta(hours=1),
+    timedelta(days=1),
+    timedelta(days=4),
+    timedelta(days=7),
+    timedelta(days=30),
+    timedelta(days=90),
+    timedelta(days=180),
 ]
 
 app = FastAPI()
@@ -84,7 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id: int = user.id
     chat_id: int = update.effective_chat.id
-    logger.info(f"Instance {INSTANCE_ID}: Received /start from user {user_id} in chat {chat_id}")
+    logger.info(f"Instance {INSTANCE_ID}: Received /start command from user {user_id} in chat {chat_id} with message: {update.message.text}")
     try:
         timezone: Optional[str] = db.get_user_timezone(user_id)
         db.add_user(user_id, user.username, user.first_name, timezone or "UTC", chat_id)
@@ -135,7 +135,7 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text: str = update.message.text.strip()
     user_id: int = update.effective_user.id
     chat_id: int = update.effective_chat.id
-    logger.info(f"Instance {INSTANCE_ID}: User {user_id} adding topic: {text}")
+    logger.info(f"Instance {INSTANCE_ID}: User {user_id} sent message '{text}' in chat {chat_id}")
     if text == "Назад 🔙":
         await update.message.reply_text("Выбери действие:", reply_markup=main_menu())
         return ConversationHandler.END
@@ -460,7 +460,7 @@ async def send_reminder(
                     "UPDATE reminders SET status = 'SENT', sent_time = NOW() WHERE reminder_id = %s", (reminder_id,)
                 )
                 conn.commit()
-        short_title = (topic_title[:97] + "...") if len(topic_title) > 97 else topic_title
+        short_title = (topic_title[:497] + "...") if len(topic_title) > 500 else topic_title
         text = f"Пора повторить тему '{short_title}'! 📚"
         keyboard = [[InlineKeyboardButton("Повторил ✅", callback_data=f"repeated_{topic_id}_{reminder_id}")]]
         await context.bot.send_message(
@@ -490,7 +490,7 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     logger.info(f"Instance {INSTANCE_ID}: Reminder {reminder_id} already processed, skipping")
                     await query.message.reply_text("Это напоминание уже обработано! 😊")
                     return
-                current_repetition: int = result[1]  # Используем repetition_count текущего напоминания
+                current_repetition: int = result[1]
                 logger.info(f"Instance {INSTANCE_ID}: Current repetition_count for reminder {reminder_id} is {current_repetition}")
                 cur.execute(
                     "UPDATE reminders SET status = 'PROCESSED', is_processed = TRUE WHERE reminder_id = %s", (reminder_id,)
@@ -566,7 +566,7 @@ async def process_overdue_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                             "SELECT status FROM reminders WHERE reminder_id = %s", (reminder_id,)
                         )
                         result = cur.fetchone()
-                        if not result or result[0] in ("SENT", "PROCESSED"):
+                        if not result or result[0] == "SENT" or result[0] == "PROCESSED":
                             logger.info(f"Instance {INSTANCE_ID}: Reminder {reminder_id} already sent or processed, skipping")
                             continue
                 timezone: Optional[str] = db.get_user_timezone(user_id)
@@ -590,7 +590,7 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not topics:
             logger.info(f"Instance {INSTANCE_ID}: No active topics for user {user_id}")
             await update.message.reply_text(
-                "Нет активных тем! Добавь тему с помощью 'Добавить тему 📝'.", reply_markup=main_menu()
+                "Нет активных тем! Добавьте тему с помощью 'Добавить тему 📝'.", reply_markup=main_menu()
             )
             return
         topic_id, title = topics[0]
@@ -623,6 +623,25 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Instance {INSTANCE_ID}: Error in test_reminder for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при создании тестового напоминания.", reply_markup=main_menu())
 
+async def reset_polling(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id: int = update.effective_user.id
+    logger.info(f"Instance {INSTANCE_ID}: Resetting polling for user {user_id}")
+    try:
+        await context.bot.delete_webhook(drop_pending_updates=True)
+        await context.application.updater.stop()
+        await asyncio.sleep(5)
+        await context.application.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            timeout=20,
+            poll_interval=2.0
+        )
+        await update.message.reply_text("Polling перезапущен! Попробуйте отправить /start.")
+        logger.info(f"Instance {INSTANCE_ID}: Polling reset successfully")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Error resetting polling: {e}")
+        await update.message.reply_text("Ошибка при перезапуске polling. Попробуйте снова.")
+
 async def restart_polling(bot_app: Application) -> None:
     logger.info(f"Instance {INSTANCE_ID}: Attempting to restart polling")
     try:
@@ -632,7 +651,7 @@ async def restart_polling(bot_app: Application) -> None:
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query"],
             timeout=20,
-            poll_interval=1.0
+            poll_interval=2.0
         )
         logger.info(f"Instance {INSTANCE_ID}: Polling restarted successfully")
     except Exception as e:
@@ -642,11 +661,7 @@ async def restart_polling(bot_app: Application) -> None:
 
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Instance {INSTANCE_ID}: Update {update} caused error {context.error}")
-    if isinstance(context.error, NetworkError):
-        logger.warning(f"Instance {INSTANCE_ID}: Network error, retrying in 60 seconds")
-        await asyncio.sleep(60)
-        await restart_polling(context.application)
-    elif isinstance(context.error, TelegramError):
+    if isinstance(context.error, TelegramError):
         logger.error(f"Instance {INSTANCE_ID}: Telegram error: {context.error.message}")
         if isinstance(context.error, Conflict):
             logger.warning(f"Instance {INSTANCE_ID}: Detected Conflict error, attempting to recover in 5 seconds")
@@ -663,7 +678,7 @@ async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_
                     drop_pending_updates=True,
                     allowed_updates=["message", "callback_query"],
                     timeout=20,
-                    poll_interval=1.0
+                    poll_interval=2.0
                 )
                 logger.info(f"Instance {INSTANCE_ID}: Polling restarted after Conflict error")
                 if update and update.effective_message:
@@ -756,6 +771,7 @@ async def main() -> None:
         )
         bot_app.add_handler(conv_handler)
         bot_app.add_handler(CommandHandler("test", test_reminder))
+        bot_app.add_handler(CommandHandler("reset", reset_polling))
         bot_app.add_handler(CallbackQueryHandler(handle_repeated, pattern=r"^repeated_.*$"))
         bot_app.add_error_handler(error_handler)
         scheduler.start()
@@ -777,7 +793,7 @@ async def main() -> None:
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query"],
             timeout=20,
-            poll_interval=1.0
+            poll_interval=2.0
         )
         logger.info(f"Instance {INSTANCE_ID}: Polling started")
         while True:
