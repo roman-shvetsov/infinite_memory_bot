@@ -15,6 +15,7 @@ from telegram.ext import (
     filters,
 )
 from fastapi import FastAPI, Request, Response
+from starlette.responses import Response
 from telegram.error import TelegramError, Conflict  # Убрали NetworkError, используем TelegramError
 from dotenv import load_dotenv
 import db
@@ -61,15 +62,16 @@ REPETITION_SCHEDULE = [
 
 app = FastAPI()
 
-@app.route("/healthz", methods=["GET", "HEAD"])
+@app.get("/healthz")
+@app.head("/healthz")
 async def health_check(request: Request):
     logger.info(f"Instance {INSTANCE_ID}: Received {request.method} health check request from {request.client.host}")
     try:
         with db.get_db_connection():
             logger.info(f"Instance {INSTANCE_ID}: Health check OK")
             if request.method == "HEAD":
-                return Response(status_code=200)  # Для HEAD возвращаем только статус
-            return {"status": "ok", "instance_id": INSTANCE_ID}  # Для GET возвращаем JSON
+                return Response(status_code=200)  # Только статус для HEAD
+            return {"status": "ok", "instance_id": INSTANCE_ID}  # JSON для GET
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
         if request.method == "HEAD":
