@@ -14,6 +14,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from fastapi import FastAPI, Request, Response
 from telegram.error import TelegramError, Conflict  # Убрали NetworkError, используем TelegramError
 from dotenv import load_dotenv
 import db
@@ -60,14 +61,19 @@ REPETITION_SCHEDULE = [
 
 app = FastAPI()
 
-@app.get("/healthz")
-async def health_check():
+@app.route("/healthz", methods=["GET", "HEAD"])
+async def health_check(request: Request):
+    logger.info(f"Instance {INSTANCE_ID}: Received {request.method} health check request from {request.client.host}")
     try:
         with db.get_db_connection():
             logger.info(f"Instance {INSTANCE_ID}: Health check OK")
-            return {"status": "ok", "instance_id": INSTANCE_ID}
+            if request.method == "HEAD":
+                return Response(status_code=200)  # Для HEAD возвращаем только статус
+            return {"status": "ok", "instance_id": INSTANCE_ID}  # Для GET возвращаем JSON
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
+        if request.method == "HEAD":
+            return Response(status_code=500)
         return {"status": "error", "message": str(e)}
 
 def main_menu() -> ReplyKeyboardMarkup:
