@@ -5,3 +5,4 @@ pytz==2024.1
 apscheduler==3.10.4
 fastapi==0.115.2
 uvicorn==0.32.0
+cachetools==5.3.3

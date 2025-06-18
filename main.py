@@ -14,7 +14,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
+from fastapi.exceptions import HTTPException
+from cachetools import TTLCache
 from starlette.responses import Response
 from telegram.error import TelegramError, Conflict  # Убрали NetworkError, используем TelegramError
 from dotenv import load_dotenv
@@ -61,22 +63,34 @@ REPETITION_SCHEDULE = [
 ]
 
 app = FastAPI()
+db_status_cache = TTLCache(maxsize=1, ttl=300)  # Кэш на 5 минут
 
 @app.get("/healthz")
 @app.head("/healthz")
 async def health_check(request: Request):
     logger.info(f"Instance {INSTANCE_ID}: Received {request.method} health check request from {request.client.host}")
+    cached_status = db_status_cache.get("db_status")
+    if cached_status is not None:
+        logger.info(f"Instance {INSTANCE_ID}: Using cached DB status: {cached_status}")
+        if request.method == "HEAD":
+            return Response(status_code=200 if cached_status["status"] == "ok" else 500)
+        return cached_status
+
     try:
         with db.get_db_connection():
             logger.info(f"Instance {INSTANCE_ID}: Health check OK")
+            status = {"status": "ok", "instance_id": INSTANCE_ID}
+            db_status_cache["db_status"] = status
             if request.method == "HEAD":
-                return Response(status_code=200)  # Только статус для HEAD
-            return {"status": "ok", "instance_id": INSTANCE_ID}  # JSON для GET
+                return Response(status_code=200)
+            return status
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
+        status = {"status": "error", "message": str(e)}
+        db_status_cache["db_status"] = status
         if request.method == "HEAD":
             return Response(status_code=500)
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -738,7 +752,7 @@ async def main() -> None:
         bot_app.bot_data["scheduler"] = scheduler
         scheduler.add_job(
             process_overdue_reminders,
-            IntervalTrigger(seconds=30),
+            IntervalTrigger(minutes=20),
             args=[bot_app],
             id="overdue_reminder_check",
             timezone=pytz.UTC,
