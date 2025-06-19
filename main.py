@@ -752,7 +752,7 @@ async def main() -> None:
         bot_app.bot_data["scheduler"] = scheduler
         scheduler.add_job(
             process_overdue_reminders,
-            IntervalTrigger(minutes=20),
+            IntervalTrigger(days=1),
             args=[bot_app],
             id="overdue_reminder_check",
             timezone=pytz.UTC,
