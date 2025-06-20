@@ -66,31 +66,33 @@ app = FastAPI()
 db_status_cache = TTLCache(maxsize=1, ttl=300)  # Кэш на 5 минут
 
 @app.get("/healthz")
+async def health_check_get(request: Request):
+    logger.warning(f"Instance {INSTANCE_ID}: Blocked unexpected GET health check from {request.client.host}")
+    raise HTTPException(status_code=403, detail="GET not allowed, use HEAD")
+
 @app.head("/healthz")
-async def health_check(request: Request):
-    logger.info(f"Instance {INSTANCE_ID}: Received {request.method} health check request from {request.client.host}")
+async def health_check_head(request: Request):
+    logger.info(f"Instance {INSTANCE_ID}: Received HEAD health check request from {request.client.host}")
     cached_status = db_status_cache.get("db_status")
     if cached_status is not None:
         logger.info(f"Instance {INSTANCE_ID}: Using cached DB status: {cached_status}")
-        if request.method == "HEAD":
-            return Response(status_code=200 if cached_status["status"] == "ok" else 500)
-        return cached_status
-
+        return Response(status_code=200 if cached_status["status"] == "ok" else 500)
+    conn = db.get_db_connection()
     try:
-        with db.get_db_connection():
-            logger.info(f"Instance {INSTANCE_ID}: Health check OK")
-            status = {"status": "ok", "instance_id": INSTANCE_ID}
-            db_status_cache["db_status"] = status
-            if request.method == "HEAD":
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                logger.info(f"Instance {INSTANCE_ID}: Health check OK")
+                status = {"status": "ok", "instance_id": INSTANCE_ID}
+                db_status_cache["db_status"] = status
                 return Response(status_code=200)
-            return status
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
         status = {"status": "error", "message": str(e)}
         db_status_cache["db_status"] = status
-        if request.method == "HEAD":
-            return Response(status_code=500)
-        raise HTTPException(status_code=500, detail=str(e))
+        return Response(status_code=500)
+    finally:
+        db.release_db_connection(conn)
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -757,12 +759,13 @@ async def main() -> None:
             id="overdue_reminder_check",
             timezone=pytz.UTC,
         )
-        scheduler.add_job(
-            db.update_awaiting_reminders,
-            IntervalTrigger(minutes=30),
-            id="awaiting_reminder_check",
-            timezone=pytz.UTC,
-        )
+        # Отключено для снижения compute time
+        # scheduler.add_job(
+        #     db.update_awaiting_reminders,
+        #     IntervalTrigger(minutes=30),
+        #     id="awaiting_reminder_check",
+        #     timezone=pytz.UTC,
+        # )
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("start", start),
@@ -830,6 +833,7 @@ async def main() -> None:
             await bot_app.shutdown()
         if "scheduler" in locals():
             scheduler.shutdown()
+        db.close_db_pool()
         logger.info(f"Instance {INSTANCE_ID}: Shutdown complete")
 
 if __name__ == "__main__":
