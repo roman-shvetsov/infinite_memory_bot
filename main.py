@@ -14,20 +14,19 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException
 from cachetools import TTLCache
-from starlette.responses import Response
 from telegram.error import TelegramError, Conflict  # Убрали NetworkError, используем TelegramError
 from dotenv import load_dotenv
 import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI
 import uvicorn
 import threading
 import uuid
+from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.responses import Response
+import logging
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -65,34 +64,41 @@ REPETITION_SCHEDULE = [
 app = FastAPI()
 db_status_cache = TTLCache(maxsize=1, ttl=300)  # Кэш на 5 минут
 
+
 @app.get("/healthz")
-async def health_check_get(request: Request):
+async def health_check_get(request: Request) -> None:
     logger.warning(f"Instance {INSTANCE_ID}: Blocked unexpected GET health check from {request.client.host}")
     raise HTTPException(status_code=403, detail="GET not allowed, use HEAD")
 
+
 @app.head("/healthz")
-async def health_check_head(request: Request):
+async def health_check_head(request: Request) -> Response:
     logger.info(f"Instance {INSTANCE_ID}: Received HEAD health check request from {request.client.host}")
-    cached_status = db_status_cache.get("db_status")
-    if cached_status is not None:
-        logger.info(f"Instance {INSTANCE_ID}: Using cached DB status: {cached_status}")
-        return Response(status_code=200 if cached_status["status"] == "ok" else 500)
-    conn = db.get_db_connection()
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                logger.info(f"Instance {INSTANCE_ID}: Health check OK")
-                status = {"status": "ok", "instance_id": INSTANCE_ID}
-                db_status_cache["db_status"] = status
-                return Response(status_code=200)
+        cached_status = db_status_cache.get("db_status")
+        if cached_status is not None:
+            logger.info(f"Instance {INSTANCE_ID}: Using cached DB status: {cached_status}")
+            return Response(status_code=200 if cached_status["status"] == "ok" else 500)
+
+        conn = db.get_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    logger.info(f"Instance {INSTANCE_ID}: Health check OK")
+                    status = {"status": "ok", "instance_id": INSTANCE_ID}
+                    db_status_cache["db_status"] = status
+                    return Response(status_code=200)
+        except Exception as e:
+            logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
+            status = {"status": "error", "message": str(e)}
+            db_status_cache["db_status"] = status
+            return Response(status_code=500)
+        finally:
+            db.release_db_connection(conn)
     except Exception as e:
-        logger.error(f"Instance {INSTANCE_ID}: Health check failed: {e}")
-        status = {"status": "error", "message": str(e)}
-        db_status_cache["db_status"] = status
+        logger.error(f"Instance {INSTANCE_ID}: Unexpected error in health check: {e}")
         return Response(status_code=500)
-    finally:
-        db.release_db_connection(conn)
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
