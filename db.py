@@ -6,6 +6,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs, urlencode
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -16,21 +17,41 @@ load_dotenv()
 
 db_pool = None
 
+
 def init_db_pool():
     global db_pool
     try:
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
             raise ValueError("DATABASE_URL not found in environment variables")
+
+        # Парсим DATABASE_URL, чтобы проверить существующие параметры
+        parsed_url = urlparse(database_url)
+        query_params = parse_qs(parsed_url.query)
+
+        # Добавляем sslmode и connect_timeout, если их нет
+        if 'sslmode' not in query_params:
+            query_params['sslmode'] = ['require']
+        if 'connect_timeout' not in query_params:
+            query_params['connect_timeout'] = ['5']
+
+        # Формируем новый DSN
+        new_query = urlencode(query_params, doseq=True)
+        new_url = parsed_url._replace(query=new_query).geturl()
+
         db_pool = SimpleConnectionPool(
             minconn=1,
             maxconn=5,
-            dsn=database_url + "?sslmode=require&connect_timeout=5"
+            dsn=new_url
         )
         logger.info("Database connection pool initialized successfully")
     except psycopg2.Error as e:
         logger.error(f"Error initializing database pool: {e}")
         raise
+    except Exception as e:
+        logger.error(f"Error parsing DATABASE_URL: {e}")
+        raise
+
 
 def get_db_connection():
     global db_pool
@@ -43,6 +64,7 @@ def get_db_connection():
         logger.error(f"Error getting connection from pool: {e}")
         raise
 
+
 def release_db_connection(conn):
     global db_pool
     if db_pool and conn:
@@ -50,6 +72,7 @@ def release_db_connection(conn):
             db_pool.putconn(conn)
         except psycopg2.Error as e:
             logger.error(f"Error releasing connection to pool: {e}")
+
 
 def close_db_pool():
     global db_pool
@@ -61,6 +84,7 @@ def close_db_pool():
             logger.error(f"Error closing database pool: {e}")
         finally:
             db_pool = None
+
 
 def init_db() -> None:
     conn = get_db_connection()
@@ -104,6 +128,7 @@ def init_db() -> None:
     finally:
         release_db_connection(conn)
 
+
 def add_user(user_id: int, username: str, firstname: str, timezone: str, chat_id: int = None) -> None:
     conn = get_db_connection()
     try:
@@ -126,6 +151,7 @@ def add_user(user_id: int, username: str, firstname: str, timezone: str, chat_id
     finally:
         release_db_connection(conn)
 
+
 def get_user_timezone(user_id: int) -> Optional[str]:
     conn = get_db_connection()
     try:
@@ -137,6 +163,7 @@ def get_user_timezone(user_id: int) -> Optional[str]:
     finally:
         release_db_connection(conn)
 
+
 def get_user_chat_id(user_id: int) -> Optional[int]:
     conn = get_db_connection()
     try:
@@ -147,6 +174,7 @@ def get_user_chat_id(user_id: int) -> Optional[int]:
                 return result[0] if result else None
     finally:
         release_db_connection(conn)
+
 
 def add_topic(user_id: int, title: str) -> int:
     conn = get_db_connection()
@@ -164,7 +192,9 @@ def add_topic(user_id: int, title: str) -> int:
     finally:
         release_db_connection(conn)
 
-def schedule_reminder(topic_id: int, scheduled_time: datetime, repetition_count: int = 0, status: str = "PENDING") -> int:
+
+def schedule_reminder(topic_id: int, scheduled_time: datetime, repetition_count: int = 0,
+                      status: str = "PENDING") -> int:
     conn = get_db_connection()
     try:
         with conn:
@@ -179,10 +209,12 @@ def schedule_reminder(topic_id: int, scheduled_time: datetime, repetition_count:
                 )
                 reminder_id = cur.fetchone()[0]
                 conn.commit()
-                logger.info(f"Scheduled reminder: topic_id={topic_id}, reminder_id={reminder_id}, scheduled_time={scheduled_time}, repetition_count={repetition_count}, status={status}")
+                logger.info(
+                    f"Scheduled reminder: topic_id={topic_id}, reminder_id={reminder_id}, scheduled_time={scheduled_time}, repetition_count={repetition_count}, status={status}")
                 return reminder_id
     finally:
         release_db_connection(conn)
+
 
 def mark_reminder_processed(reminder_id: int) -> None:
     conn = get_db_connection()
@@ -198,6 +230,7 @@ def mark_reminder_processed(reminder_id: int) -> None:
     finally:
         release_db_connection(conn)
 
+
 def mark_reminder_sent(reminder_id: int) -> None:
     conn = get_db_connection()
     try:
@@ -211,6 +244,7 @@ def mark_reminder_sent(reminder_id: int) -> None:
                 logger.info(f"Marked reminder {reminder_id} as sent")
     finally:
         release_db_connection(conn)
+
 
 def is_reminder_processed(reminder_id: int) -> bool:
     conn = get_db_connection()
@@ -226,6 +260,7 @@ def is_reminder_processed(reminder_id: int) -> bool:
     finally:
         release_db_connection(conn)
 
+
 def get_reminder_scheduled_time(reminder_id: int) -> Optional[datetime]:
     conn = get_db_connection()
     try:
@@ -240,6 +275,7 @@ def get_reminder_scheduled_time(reminder_id: int) -> Optional[datetime]:
     finally:
         release_db_connection(conn)
 
+
 def get_reminder_repetition_count(reminder_id: int) -> int:
     conn = get_db_connection()
     try:
@@ -253,6 +289,7 @@ def get_reminder_repetition_count(reminder_id: int) -> int:
                 return result[0] if result else 0
     finally:
         release_db_connection(conn)
+
 
 def get_topic_repetition_count(topic_id: int) -> int:
     conn = get_db_connection()
@@ -275,6 +312,7 @@ def get_topic_repetition_count(topic_id: int) -> int:
                 return result[0]
     finally:
         release_db_connection(conn)
+
 
 def get_overdue_reminders() -> List[dict]:
     conn = get_db_connection()
@@ -301,6 +339,7 @@ def get_overdue_reminders() -> List[dict]:
     finally:
         release_db_connection(conn)
 
+
 def get_all_pending_reminders() -> List[dict]:
     conn = get_db_connection()
     try:
@@ -325,6 +364,7 @@ def get_all_pending_reminders() -> List[dict]:
     finally:
         release_db_connection(conn)
 
+
 def update_awaiting_reminders() -> None:
     conn = get_db_connection()
     try:
@@ -345,6 +385,7 @@ def update_awaiting_reminders() -> None:
     finally:
         release_db_connection(conn)
 
+
 def clear_unprocessed_reminders(topic_id: int) -> None:
     conn = get_db_connection()
     try:
@@ -363,6 +404,7 @@ def clear_unprocessed_reminders(topic_id: int) -> None:
     finally:
         release_db_connection(conn)
 
+
 def delete_topic(topic_id: int) -> None:
     conn = get_db_connection()
     try:
@@ -374,6 +416,7 @@ def delete_topic(topic_id: int) -> None:
                 logger.info(f"Deleted topic {topic_id} and its reminders")
     finally:
         release_db_connection(conn)
+
 
 def pause_topic(topic_id: int) -> None:
     conn = get_db_connection()
@@ -393,6 +436,7 @@ def pause_topic(topic_id: int) -> None:
     finally:
         release_db_connection(conn)
 
+
 def resume_topic(topic_id: int) -> None:
     conn = get_db_connection()
     try:
@@ -411,6 +455,7 @@ def resume_topic(topic_id: int) -> None:
     finally:
         release_db_connection(conn)
 
+
 def get_all_topics(user_id: int) -> List[Tuple[int, str, bool]]:
     conn = get_db_connection()
     try:
@@ -428,6 +473,7 @@ def get_all_topics(user_id: int) -> List[Tuple[int, str, bool]]:
                 return [(row[0], row[1], row[2]) for row in cur.fetchall()]
     finally:
         release_db_connection(conn)
+
 
 def get_active_topics(user_id: int) -> List[Tuple[int, str]]:
     conn = get_db_connection()
@@ -448,6 +494,7 @@ def get_active_topics(user_id: int) -> List[Tuple[int, str]]:
     finally:
         release_db_connection(conn)
 
+
 def get_paused_topics(user_id: int) -> List[Tuple[int, str]]:
     conn = get_db_connection()
     try:
@@ -466,6 +513,7 @@ def get_paused_topics(user_id: int) -> List[Tuple[int, str]]:
                 return [(row[0], row[1]) for row in cur.fetchall()]
     finally:
         release_db_connection(conn)
+
 
 def get_user_progress(user_id: int) -> List[Tuple[str, int, Optional[datetime], bool, str]]:
     conn = get_db_connection()
