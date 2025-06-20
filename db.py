@@ -41,8 +41,9 @@ def init_db_pool():
 
         db_pool = SimpleConnectionPool(
             minconn=1,
-            maxconn=5,
-            dsn=new_url
+            maxconn=2,  # Уменьшаем до 2
+            dsn=new_url,
+            options="-c idle_in_transaction_session_timeout=30000"  # 30 секунд тайм-аут
         )
         logger.info("Database connection pool initialized successfully")
     except psycopg2.Error as e:
