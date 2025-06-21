@@ -2,7 +2,7 @@ import os
 import pytz
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Optional
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -23,6 +23,9 @@ import threading
 import uuid
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.responses import Response
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -59,6 +62,8 @@ REPETITION_SCHEDULE = [
 
 app = FastAPI()
 db_status_cache = TTLCache(maxsize=1, ttl=900)  # Кэш на 15 минут
+user_timezone_cache = TTLCache(maxsize=100, ttl=3600)  # Кэш для timezone на 1 час
+user_chat_id_cache = TTLCache(maxsize=100, ttl=3600)  # Кэш для chat_id на 1 час
 
 @app.get("/healthz")
 async def health_check_get(request: Request) -> None:
@@ -103,6 +108,16 @@ def main_menu() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+def adjust_reminder_time(scheduled_time: datetime, tz: pytz.BaseTzInfo) -> datetime:
+    """Переносит напоминания с 00:00–08:00 на 08:00 того же дня."""
+    local_time = scheduled_time.astimezone(tz)
+    local_hour = local_time.hour
+    if 0 <= local_hour < 8:
+        logger.info(f"Adjusting reminder time from {local_time} to 08:00")
+        adjusted_local = local_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        return adjusted_local.astimezone(pytz.UTC)
+    return scheduled_time
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id: int = user.id
@@ -136,6 +151,8 @@ async def choose_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     logger.info(f"Instance {INSTANCE_ID}: User {user.id} selected timezone: {timezone} in chat {chat_id}")
     try:
         db.add_user(user.id, user.username, user.first_name, timezone, chat_id)
+        user_timezone_cache[user.id] = timezone
+        user_chat_id_cache[user.id] = chat_id
         await query.message.reply_text(
             f"Часовой пояс {timezone} сохранён! 😊 Выбери действие:", reply_markup=main_menu()
         )
@@ -170,7 +187,7 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ADD_TOPIC
     try:
         topic_id: int = db.add_topic(user_id, text)
-        timezone: Optional[str] = db.get_user_timezone(user_id)
+        timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
         if not timezone:
             logger.error(f"Instance {INSTANCE_ID}: No timezone set for user {user_id}")
             await update.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
@@ -178,10 +195,23 @@ async def add_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
         first_reminder = now + REPETITION_SCHEDULE[0]
-        reminder_id: int = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), repetition_count=0)
-        logger.info(f"Instance {INSTANCE_ID}: Scheduler disabled, reminder for topic_id {topic_id} (reminder_id {reminder_id}) not scheduled")
+        first_reminder = adjust_reminder_time(first_reminder.astimezone(pytz.UTC), tz)
+        reminder_id: int = db.schedule_reminder(topic_id, first_reminder, repetition_count=0)
+        scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+        job_id: str = f"reminder_{topic_id}_{reminder_id}"
+        if scheduler.get_job(job_id):
+            logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
+        scheduler.add_job(
+            send_reminder,
+            DateTrigger(run_date=first_reminder),
+            args=[chat_id, topic_id, text, reminder_id, context, tz],
+            timezone=pytz.UTC,
+            id=job_id,
+        )
+        logger.info(f"Instance {INSTANCE_ID}: Scheduled reminder for topic_id {topic_id} (reminder_id {reminder_id})")
         await update.message.reply_text(
-            f"Тема '{text}' добавлена! 📝 Напоминания временно отключены для тестирования.",
+            f"Тема '{text}' добавлена! 📝 Первое напоминание: {first_reminder.astimezone(tz).strftime('%Y-%m-%d %H:%M')} 🕒",
             reply_markup=main_menu(),
         )
         return ConversationHandler.END
@@ -235,6 +265,11 @@ async def delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 if not result or result[0] != user_id:
                     await query.message.reply_text("Эта тема не принадлежит вам!")
                     return DELETE_TOPIC
+        scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+        jobs = [job for job in scheduler.get_jobs() if job.id.startswith(f"reminder_{topic_id}_")]
+        for job in jobs:
+            scheduler.remove_job(job.id)
+            logger.info(f"Instance {INSTANCE_ID}: Removed job {job.id} for topic {topic_id}")
         db.delete_topic(topic_id)
         topics = db.get_all_topics(user_id)
         if not topics:
@@ -300,6 +335,11 @@ async def pause_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 if not result or result[0] != user_id:
                     await query.message.reply_text("Эта тема не принадлежит вам!")
                     return PAUSE_TOPIC
+        scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+        jobs = [job for job in scheduler.get_jobs() if job.id.startswith(f"reminder_{topic_id}_")]
+        for job in jobs:
+            scheduler.remove_job(job.id)
+            logger.info(f"Instance {INSTANCE_ID}: Removed job {job.id} for topic {topic_id}")
         db.clear_unprocessed_reminders(topic_id)
         db.pause_topic(topic_id)
         topics = db.get_active_topics(user_id)
@@ -367,7 +407,7 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                     return RESUME_TOPIC
         db.clear_unprocessed_reminders(topic_id)
         db.resume_topic(topic_id)
-        timezone: Optional[str] = db.get_user_timezone(user_id)
+        timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
         if not timezone:
             logger.error(f"Instance {INSTANCE_ID}: No timezone set for user {user_id}")
             await query.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
@@ -375,13 +415,26 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
         first_reminder = now + REPETITION_SCHEDULE[0]
-        reminder_id: int = db.schedule_reminder(topic_id, first_reminder.astimezone(pytz.UTC), repetition_count=0)
+        first_reminder = adjust_reminder_time(first_reminder.astimezone(pytz.UTC), tz)
+        reminder_id: int = db.schedule_reminder(topic_id, first_reminder, repetition_count=0)
+        scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
         topics = db.get_all_topics(user_id)
         title: str = next((t[1] for t in topics if t[0] == topic_id), "Тема")
-        logger.info(f"Instance {INSTANCE_ID}: Scheduler disabled, reminder for topic_id {topic_id} (reminder_id {reminder_id}) not scheduled")
+        job_id: str = f"reminder_{topic_id}_{reminder_id}"
+        if scheduler.get_job(job_id):
+            logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
+        scheduler.add_job(
+            send_reminder,
+            DateTrigger(run_date=first_reminder),
+            args=[chat_id, topic_id, title, reminder_id, context, tz],
+            timezone=pytz.UTC,
+            id=job_id,
+        )
+        logger.info(f"Instance {INSTANCE_ID}: Scheduled reminder for topic_id {topic_id} (reminder_id {reminder_id})")
         topics = db.get_paused_topics(user_id)
         if not topics:
-            await query.message.edit_text("Тема возобновлена! ▶️ У тебя больше нет приостановленных тем. Напоминания временно отключены.")
+            await query.message.edit_text(f"Тема возобновлена! ▶️ Первое напоминание: {first_reminder.astimezone(tz).strftime('%Y-%m-%d %H:%M')} 🕒")
             await query.message.reply_text("Выбери действие:", reply_markup=main_menu())
             context.user_data.pop("back_message_sent", None)
             return ConversationHandler.END
@@ -390,7 +443,8 @@ async def resume_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             for topic_id, title in topics
         ]
         await query.message.edit_text(
-            "Тема возобновлена! ▶️ Напоминания временно отключены. Выбери другую тему:", reply_markup=InlineKeyboardMarkup(keyboard)
+            f"Тема возобновлена! ▶️ Первое напоминание: {first_reminder.astimezone(tz).strftime('%Y-%m-%d %H:%M')} 🕒 Выбери другую тему:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return RESUME_TOPIC
     except Exception as e:
@@ -408,7 +462,7 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         messages = []
         current_message = "Твои темы: 📋\n"
-        timezone: Optional[str] = db.get_user_timezone(user_id)
+        timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
         tz = pytz.timezone(timezone) if timezone else pytz.UTC
         for i, (title, repetitions, next_reminder, is_paused, status) in enumerate(progress, 1):
             short_title = (title[:497] + "...") if len(title) > 500 else title
@@ -439,8 +493,41 @@ async def send_reminder(
     context: ContextTypes.DEFAULT_TYPE,
     tz: pytz.BaseTzInfo
 ) -> None:
-    logger.info(f"Instance {INSTANCE_ID}: Scheduler disabled, reminder for topic {topic_id} (reminder_id {reminder_id}) not sent")
-    return
+    logger.info(f"Instance {INSTANCE_ID}: Sending reminder for topic {topic_id} (reminder_id {reminder_id}) to chat {chat_id}")
+    try:
+        if db.is_reminder_processed(reminder_id):
+            logger.info(f"Instance {INSTANCE_ID}: Reminder {reminder_id} already processed, skipping")
+            return
+        scheduled_time = db.get_reminder_scheduled_time(reminder_id)
+        if scheduled_time:
+            adjusted_time = adjust_reminder_time(scheduled_time, tz)
+            if adjusted_time != scheduled_time:
+                logger.info(f"Instance {INSTANCE_ID}: Rescheduling reminder {reminder_id} from {scheduled_time} to {adjusted_time}")
+                scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+                job_id = f"reminder_{topic_id}_{reminder_id}"
+                scheduler.remove_job(job_id)
+                scheduler.add_job(
+                    send_reminder,
+                    DateTrigger(run_date=adjusted_time),
+                    args=[chat_id, topic_id, topic_title, reminder_id, context, tz],
+                    timezone=pytz.UTC,
+                    id=job_id,
+                )
+                db.schedule_reminder(topic_id, adjusted_time, db.get_reminder_repetition_count(reminder_id))
+                return
+        db.mark_reminder_sent(reminder_id)
+        keyboard = [[InlineKeyboardButton("Повторил! ✅", callback_data=f"repeated_{topic_id}_{reminder_id}")]]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Время повторить: *{topic_title}*! 📚\nНажми 'Повторил!', когда будешь готов.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        logger.info(f"Instance {INSTANCE_ID}: Reminder {reminder_id} sent to chat {chat_id}")
+    except TelegramError as e:
+        logger.error(f"Instance {INSTANCE_ID}: Telegram error sending reminder {reminder_id} to chat {chat_id}: {e}")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Error sending reminder {reminder_id}: {e}")
 
 async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Instance {INSTANCE_ID}: Received callback query: {update.callback_query.data}")
@@ -468,7 +555,7 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "UPDATE reminders SET status = 'PROCESSED', is_processed = TRUE WHERE reminder_id = %s", (reminder_id,)
                 )
                 conn.commit()
-        timezone: Optional[str] = db.get_user_timezone(user_id)
+        timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
         if not timezone:
             logger.error(f"Instance {INSTANCE_ID}: No timezone set for user {user_id}")
             await query.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
@@ -479,6 +566,7 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info(f"Instance {INSTANCE_ID}: Planning next repetition {next_repetition} for topic {topic_id}")
         if next_repetition < len(REPETITION_SCHEDULE):
             next_time = now + REPETITION_SCHEDULE[next_repetition]
+            next_time = adjust_reminder_time(next_time.astimezone(pytz.UTC), tz)
             topics = db.get_all_topics(user_id)
             title: str = next((t[1] for t in topics if t[0] == topic_id), "Тема")
             with db.get_db_connection() as conn:
@@ -491,10 +579,22 @@ async def handle_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     if existing_reminders:
                         logger.warning(f"Instance {INSTANCE_ID}: Found {len(existing_reminders)} pending reminders for topic {topic_id}, clearing them")
                         db.clear_unprocessed_reminders(topic_id)
-            new_reminder_id: int = db.schedule_reminder(topic_id, next_time.astimezone(pytz.UTC), repetition_count=next_repetition)
-            logger.info(f"Instance {INSTANCE_ID}: Scheduler disabled, reminder for topic_id {topic_id} (reminder_id {new_reminder_id}) not scheduled")
+            new_reminder_id: int = db.schedule_reminder(topic_id, next_time, repetition_count=next_repetition)
+            scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+            job_id: str = f"reminder_{topic_id}_{new_reminder_id}"
+            if scheduler.get_job(job_id):
+                logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, removing before adding new")
+                scheduler.remove_job(job_id)
+            scheduler.add_job(
+                send_reminder,
+                DateTrigger(run_date=next_time),
+                args=[chat_id, topic_id, title, new_reminder_id, context, tz],
+                timezone=pytz.UTC,
+                id=job_id,
+            )
+            logger.info(f"Instance {INSTANCE_ID}: Scheduled next reminder for topic_id {topic_id} (reminder_id {new_reminder_id})")
             await query.message.reply_text(
-                f"Молодец, что повторил! 💪 Напоминания временно отключены для тестирования."
+                f"Молодец, что повторил! 💪 Следующее напоминание: {next_time.astimezone(tz).strftime('%Y-%m-%d %H:%M')} 🕒"
             )
         else:
             logger.info(f"Instance {INSTANCE_ID}: Topic {topic_id} completed all repetitions")
@@ -524,17 +624,33 @@ async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         topic_id, title = topics[0]
         current_repetition: int = db.get_topic_repetition_count(topic_id)
         logger.info(f"Instance {INSTANCE_ID}: Test reminder for topic {topic_id} with current repetition_count={current_repetition}")
-        timezone: Optional[str] = db.get_user_timezone(user_id)
+        timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
         if not timezone:
             logger.error(f"Instance {INSTANCE_ID}: No timezone set for user {user_id}")
             await update.message.reply_text("Ошибка: не установлен часовой пояс. Начните заново с /start.")
             return
         tz = pytz.timezone(timezone)
         test_time = datetime.now(tz) + timedelta(seconds=10)
+        test_time = adjust_reminder_time(test_time.astimezone(pytz.UTC), tz)
         next_repetition: int = current_repetition + 1 if current_repetition < len(REPETITION_SCHEDULE) - 1 else current_repetition
-        reminder_id: int = db.schedule_reminder(topic_id, test_time.astimezone(pytz.UTC), repetition_count=next_repetition, status="TESTING")
-        logger.info(f"Instance {INSTANCE_ID}: Scheduler disabled, test reminder for topic_id {topic_id} (reminder_id {reminder_id}) not scheduled")
-        await update.message.reply_text("Тестовое напоминание не запланировано, так как scheduler отключен!", reply_markup=main_menu())
+        reminder_id: int = db.schedule_reminder(topic_id, test_time, repetition_count=next_repetition, status="TESTING")
+        scheduler: AsyncIOScheduler = context.bot_data.get("scheduler")
+        job_id: str = f"reminder_{topic_id}_{reminder_id}"
+        if scheduler.get_job(job_id):
+            logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, removing before adding new")
+            scheduler.remove_job(job_id)
+        scheduler.add_job(
+            send_reminder,
+            DateTrigger(run_date=test_time),
+            args=[chat_id, topic_id, title, reminder_id, context, tz],
+            timezone=pytz.UTC,
+            id=job_id,
+        )
+        logger.info(f"Instance {INSTANCE_ID}: Scheduled test reminder for topic_id {topic_id} (reminder_id {reminder_id})")
+        await update.message.reply_text(
+            f"Тестовое напоминание запланировано через 10 секунд! 🕒 Тема: {title}",
+            reply_markup=main_menu()
+        )
     except Exception as e:
         logger.error(f"Instance {INSTANCE_ID}: Error in test_reminder for user {user_id}: {e}")
         await update.message.reply_text("Ошибка при создании тестового напоминания.", reply_markup=main_menu())
@@ -574,6 +690,78 @@ async def restart_polling(bot_app: Application) -> None:
         logger.error(f"Instance {INSTANCE_ID}: Failed to restart polling: {e}")
         await asyncio.sleep(60)
         await restart_polling(bot_app)
+
+async def process_overdue_reminders(bot_app: Application) -> None:
+    logger.info(f"Instance {INSTANCE_ID}: Checking for overdue reminders")
+    try:
+        reminders = db.get_overdue_reminders()
+        if not reminders:
+            logger.info(f"Instance {INSTANCE_ID}: No overdue reminders found")
+            return
+        for reminder in reminders:
+            reminder_id: int = reminder["reminder_id"]
+            topic_id: int = reminder["topic_id"]
+            user_id: int = reminder["user_id"]
+            title: str = reminder["title"]
+            chat_id: int = user_chat_id_cache.get(user_id) or db.get_user_chat_id(user_id)
+            repetition_count: int = reminder["repetition_count"]
+            timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
+            if not chat_id or not timezone:
+                logger.error(f"Instance {INSTANCE_ID}: No chat_id or timezone for user {user_id}, skipping reminder {reminder_id}")
+                continue
+            tz = pytz.timezone(timezone)
+            scheduled_time = reminder["scheduled_time"]
+            adjusted_time = adjust_reminder_time(scheduled_time, tz)
+            scheduler: AsyncIOScheduler = bot_app.bot_data.get("scheduler")
+            job_id: str = f"reminder_{topic_id}_{reminder_id}"
+            if scheduler.get_job(job_id):
+                logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, skipping")
+                continue
+            scheduler.add_job(
+                send_reminder,
+                DateTrigger(run_date=adjusted_time),
+                args=[chat_id, topic_id, title, reminder_id, bot_app, tz],
+                timezone=pytz.UTC,
+                id=job_id,
+            )
+            logger.info(f"Instance {INSTANCE_ID}: Scheduled overdue reminder for topic_id {topic_id} (reminder_id {reminder_id})")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Error processing overdue reminders: {e}")
+
+async def restore_scheduled_reminders(scheduler: AsyncIOScheduler, bot_app: Application) -> None:
+    logger.info(f"Instance {INSTANCE_ID}: Restoring scheduled reminders")
+    try:
+        reminders = db.get_all_pending_reminders()
+        if not reminders:
+            logger.info(f"Instance {INSTANCE_ID}: No pending reminders to restore")
+            return
+        for reminder in reminders:
+            reminder_id: int = reminder["reminder_id"]
+            topic_id: int = reminder["topic_id"]
+            user_id: int = reminder["user_id"]
+            title: str = reminder["title"]
+            scheduled_time: datetime = reminder["scheduled_time"]
+            chat_id: int = user_chat_id_cache.get(user_id) or db.get_user_chat_id(user_id)
+            timezone: Optional[str] = user_timezone_cache.get(user_id) or db.get_user_timezone(user_id)
+            if not chat_id or not timezone:
+                logger.error(f"Instance {INSTANCE_ID}: No chat_id or timezone for user {user_id}, skipping reminder {reminder_id}")
+                continue
+            tz = pytz.timezone(timezone)
+            adjusted_time = adjust_reminder_time(scheduled_time, tz)
+            job_id: str = f"reminder_{topic_id}_{reminder_id}"
+            if scheduler.get_job(job_id):
+                logger.warning(f"Instance {INSTANCE_ID}: Job {job_id} already exists, skipping")
+                continue
+            scheduler.add_job(
+                send_reminder,
+                DateTrigger(run_date=adjusted_time),
+                args=[chat_id, topic_id, title, reminder_id, bot_app, tz],
+                timezone=pytz.UTC,
+                id=job_id,
+            )
+            logger.info(f"Instance {INSTANCE_ID}: Restored reminder for topic_id {topic_id} (reminder_id {reminder_id})")
+    except Exception as e:
+        logger.error(f"Instance {INSTANCE_ID}: Error restoring scheduled reminders: {e}")
 
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Instance {INSTANCE_ID}: Update {update} caused error {context.error}")
@@ -617,6 +805,18 @@ async def main() -> None:
         if not bot_token:
             raise ValueError(f"Instance {INSTANCE_ID}: BOT_TOKEN not found in .env")
         bot_app = Application.builder().token(bot_token).build()
+        scheduler = AsyncIOScheduler(timezone=pytz.UTC)
+        bot_app.bot_data["scheduler"] = scheduler
+        scheduler.add_job(
+            process_overdue_reminders,
+            IntervalTrigger(hours=6),
+            args=[bot_app],
+            id="overdue_reminder_check",
+            timezone=pytz.UTC,
+        )
+        scheduler.start()
+        logger.info(f"Instance {INSTANCE_ID}: Scheduler started")
+        await restore_scheduled_reminders(scheduler, bot_app)
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("start", start),
@@ -679,6 +879,9 @@ async def main() -> None:
         if "bot_app" in locals():
             await bot_app.stop()
             await bot_app.shutdown()
+        if "scheduler" in locals():
+            scheduler.shutdown()
+            logger.info(f"Instance {INSTANCE_ID}: Scheduler shutdown")
         db.close_db_pool()
         logger.info(f"Instance {INSTANCE_ID}: Shutdown complete")
 

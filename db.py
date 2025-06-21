@@ -7,6 +7,7 @@ import logging
 from dotenv import load_dotenv
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
+from cachetools import TTLCache
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 db_pool = None
+timezone_cache = TTLCache(maxsize=100, ttl=3600)  # Кэш для timezone на 1 час
+chat_id_cache = TTLCache(maxsize=100, ttl=3600)  # Кэш для chat_id на 1 час
 
 def init_db_pool():
     global db_pool
@@ -24,23 +27,20 @@ def init_db_pool():
         if not database_url:
             raise ValueError("DATABASE_URL not found in environment variables")
 
-        # Парсим DATABASE_URL, чтобы проверить существующие параметры
         parsed_url = urlparse(database_url)
         query_params = parse_qs(parsed_url.query)
 
-        # Добавляем sslmode и connect_timeout, если их нет
         if 'sslmode' not in query_params:
             query_params['sslmode'] = ['require']
         if 'connect_timeout' not in query_params:
             query_params['connect_timeout'] = ['5']
 
-        # Формируем новый DSN
         new_query = urlencode(query_params, doseq=True)
         new_url = parsed_url._replace(query=new_query).geturl()
 
         db_pool = SimpleConnectionPool(
             minconn=1,
-            maxconn=2,  # Уменьшаем до 2
+            maxconn=2,
             dsn=new_url
         )
         logger.info("Database connection pool initialized successfully")
@@ -141,29 +141,46 @@ def add_user(user_id: int, username: str, firstname: str, timezone: str, chat_id
                     (user_id, username, firstname, timezone, chat_id)
                 )
                 conn.commit()
+                timezone_cache[user_id] = timezone
+                if chat_id:
+                    chat_id_cache[user_id] = chat_id
                 logger.info(f"User {user_id} added/updated with timezone {timezone}")
     finally:
         release_db_connection(conn)
 
 def get_user_timezone(user_id: int) -> Optional[str]:
+    cached_timezone = timezone_cache.get(user_id)
+    if cached_timezone is not None:
+        logger.info(f"Returning cached timezone {cached_timezone} for user {user_id}")
+        return cached_timezone
     conn = get_db_connection()
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT timezone FROM users WHERE user_id = %s", (user_id,))
                 result = cur.fetchone()
-                return result[0] if result else None
+                timezone = result[0] if result else None
+                if timezone:
+                    timezone_cache[user_id] = timezone
+                return timezone
     finally:
         release_db_connection(conn)
 
 def get_user_chat_id(user_id: int) -> Optional[int]:
+    cached_chat_id = chat_id_cache.get(user_id)
+    if cached_chat_id is not None:
+        logger.info(f"Returning cached chat_id {cached_chat_id} for user {user_id}")
+        return cached_chat_id
     conn = get_db_connection()
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT chat_id FROM users WHERE user_id = %s", (user_id,))
                 result = cur.fetchone()
-                return result[0] if result else None
+                chat_id = result[0] if result else None
+                if chat_id:
+                    chat_id_cache[user_id] = chat_id
+                return chat_id
     finally:
         release_db_connection(conn)
 
