@@ -13,6 +13,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import Database
 import asyncio
+from aiohttp import web
 
 # Настройка логирования
 logging.basicConfig(
@@ -29,6 +30,16 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [["Мой прогресс", "Добавить тему", "Удалить тему"]],
     resize_keyboard=True
 )
+
+async def health_check(request):
+    """
+    Обработка GET и HEAD запросов для /health.
+    Возвращает JSON {"status": "ok"} для GET и пустой ответ для HEAD.
+    """
+    logger.debug(f"Received {request.method} request to /health")
+    if request.method == "HEAD":
+        return web.Response(status=200)
+    return web.json_response({"status": "ok"})
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Received /start command from user {update.effective_user.id}")
@@ -202,7 +213,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                         reply_markup=MAIN_KEYBOARD
                     )
                 else:
-                    await query.message.reply_text(
+                    await update.message.reply_text(
                         f"Молодец! 😺 Следующее повторение темы '{topic.topic_name}' {next_review.strftime('%d.%m.%Y %H:%M')}.",
                         reply_markup=MAIN_KEYBOARD
                     )
@@ -440,6 +451,16 @@ async def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(handle_callback_query))
 
+        # Настройка HTTP-сервера для health check
+        app = web.Application()
+        app.router.add_route('GET', '/health', health_check)
+        app.router.add_route('HEAD', '/health', health_check)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        logger.debug("Health check server started on port 8080")
+
         scheduler.start()
         logger.debug("Scheduler started")
 
@@ -472,11 +493,13 @@ async def main():
             await application.updater.stop()
             await application.stop()
             await application.shutdown()
+            await runner.cleanup()
             scheduler.shutdown(wait=False)
-            logger.debug("Scheduler and application shut down successfully")
+            logger.debug("Scheduler, application, and health check server shut down successfully")
 
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
+        await runner.cleanup() if 'runner' in locals() else None
         scheduler.shutdown(wait=False)
         raise
 
