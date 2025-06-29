@@ -166,6 +166,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     f"Тема '{topic.topic_name}' перенесена в удалённые! 😺",
                     reply_markup=MAIN_KEYBOARD
                 )
+                # Обновляем клавиатуру, удаляя кнопку удалённой темы
+                topics = db.get_active_topics(user_id, db.get_user(user_id).timezone)
+                if topics:
+                    keyboard = [
+                        [InlineKeyboardButton(topic.topic_name, callback_data=f"delete:{topic.topic_id}")]
+                        for topic in topics
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.message.edit_reply_markup(reply_markup=reply_markup)
+                    logger.debug(f"Updated keyboard for user {user_id} after deleting topic {topic_id}")
+                else:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                    await query.message.reply_text(
+                        "У тебя больше нет активных тем! 😿",
+                        reply_markup=MAIN_KEYBOARD
+                    )
+                    logger.debug(f"No active topics left for user {user_id}, removed keyboard")
                 context.user_data["state"] = None
             except Exception as e:
                 logger.error(f"Error deleting topic {topic_id} for user {user_id}: {e}")
@@ -190,6 +207,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=MAIN_KEYBOARD
                 )
                 return
+            # Проверяем, существует ли напоминание
+            reminder = db.get_reminder(reminder_id, user_id, user.timezone)
+            if not reminder:
+                logger.warning(f"Reminder {reminder_id} not found for user {user_id}, checking topic progress")
+                # Проверяем, была ли тема обновлена
+                topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+                if topic and topic.completed_repetitions > 0:
+                    await query.message.reply_text(
+                        f"Повторение для темы '{topic.topic_name}' уже засчитано! 😺 Проверь прогресс с помощью 'Мой прогресс'.",
+                        reply_markup=MAIN_KEYBOARD
+                    )
+                else:
+                    await query.message.reply_text(
+                        "Ой, напоминание или тема не найдены. 😿 Попробуй снова!",
+                        reply_markup=MAIN_KEYBOARD
+                    )
+                return
             result = db.complete_reminder(reminder_id, user_id, user.timezone)
             if result:
                 topic, new_reminder_id = result
@@ -213,7 +247,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                         reply_markup=MAIN_KEYBOARD
                     )
                 else:
-                    await update.message.reply_text(
+                    await query.message.reply_text(
                         f"Молодец! 😺 Следующее повторение темы '{topic.topic_name}' {next_review.strftime('%d.%m.%Y %H:%M')}.",
                         reply_markup=MAIN_KEYBOARD
                     )
@@ -396,19 +430,20 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"No active topics found for user {user_id}")
         return
 
-    progress_text = f"Твой прогресс: 😺 (Часовой пояс: {user.timezone})\n\n"
+    progress_text = f"📚 Твой прогресс: 😺 (Часовой пояс: {user.timezone})\n\n"
     for topic in topics:
         logger.debug(
             f"Topic {topic.topic_name}: next_review={topic.next_review.isoformat() if topic.next_review else 'None'}"
         )
         next_review = topic.next_review.astimezone(tz) if topic.next_review else None
         progress_text += (
-            f"Тема: {topic.topic_name}\n"
-            f"Следующее повторение: {next_review.strftime('%d.%m.%Y %H:%M') if next_review else 'нет'}\n"
-            f"Завершено: {topic.completed_repetitions}/6 повторений\n\n"
+            f"📖 Тема: {topic.topic_name}\n"
+            f"⏰ Следующее повторение: {next_review.strftime('%d.%m.%Y %H:%M') if next_review else 'нет'}\n"
+            f"✅ Завершено: {topic.completed_repetitions}/6 повторений\n\n"
+            f"---\n"
         )
 
-    await update.message.reply_text(progress_text, reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(progress_text.strip(), reply_markup=MAIN_KEYBOARD)
     logger.debug(f"Progress sent to user {user_id}")
 
 async def schedule_existing_reminders(application):

@@ -136,7 +136,6 @@ class Database:
                     scheduled_time=now + timedelta(hours=1)
                 )
                 session.add(reminder)
-                logger.debug(f"Added first reminder for topic '{topic_name}' at {(now + timedelta(hours=1)).isoformat()}")
                 session.commit()
                 logger.debug(f"Topic '{topic_name}' and first reminder added for user {user_id}, first review: {topic.next_review.isoformat()}")
                 return topic_id
@@ -212,6 +211,49 @@ class Database:
             logger.error(f"Error fetching topic '{topic_name}' for user {user_id}: {e}")
             raise
 
+    def get_reminder(self, reminder_id: int, user_id: int, timezone: str):
+        try:
+            with self.Session() as session:
+                reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
+                if reminder:
+                    tz = pytz.timezone(timezone)
+                    if reminder.scheduled_time:
+                        if reminder.scheduled_time.tzinfo is None:
+                            reminder.scheduled_time = reminder.scheduled_time.replace(tzinfo=pytz.UTC).astimezone(tz)
+                        elif reminder.scheduled_time.tzinfo != tz:
+                            reminder.scheduled_time = reminder.scheduled_time.astimezone(tz)
+                logger.debug(f"Queried reminder {reminder_id} for user {user_id}: {'found' if reminder else 'not found'}")
+                return reminder
+        except Exception as e:
+            logger.error(f"Error fetching reminder {reminder_id} for user {user_id}: {e}")
+            raise
+
+    def get_topic_by_reminder_id(self, reminder_id: int, user_id: int, timezone: str):
+        try:
+            with self.Session() as session:
+                reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
+                if not reminder:
+                    logger.debug(f"Reminder {reminder_id} not found for user {user_id}")
+                    return None
+                topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, user_id=user_id).first()
+                if topic:
+                    tz = pytz.timezone(timezone)
+                    if topic.next_review:
+                        if topic.next_review.tzinfo is None:
+                            topic.next_review = topic.next_review.replace(tzinfo=pytz.UTC).astimezone(tz)
+                        elif topic.next_review.tzinfo != tz:
+                            topic.next_review = topic.next_review.astimezone(tz)
+                    if topic.last_reviewed:
+                        if topic.last_reviewed.tzinfo is None:
+                            topic.last_reviewed = topic.last_reviewed.replace(tzinfo=pytz.UTC).astimezone(tz)
+                        elif topic.last_reviewed.tzinfo != tz:
+                            topic.last_reviewed = topic.last_reviewed.astimezone(tz)
+                logger.debug(f"Queried topic for reminder {reminder_id} for user {user_id}: {'found' if topic else 'not found'}")
+                return topic
+        except Exception as e:
+            logger.error(f"Error fetching topic for reminder {reminder_id} for user {user_id}: {e}")
+            raise
+
     def get_reminders(self, user_id: int, timezone: str):
         try:
             with self.Session() as session:
@@ -270,6 +312,8 @@ class Database:
                 topic.completed_repetitions += 1
                 topic.last_reviewed = now
                 topic.repetition_stage += 1
+                logger.debug(f"Processing reminder {reminder_id} for topic '{topic.topic_name}' (id: {topic.topic_id}), "
+                            f"repetitions: {topic.completed_repetitions}/6")
                 review_intervals = [timedelta(hours=1), timedelta(days=1), timedelta(days=3),
                                   timedelta(days=7), timedelta(days=14), timedelta(days=30)]
                 new_reminder_id = None
@@ -283,9 +327,11 @@ class Database:
                     session.add(new_reminder)
                     session.flush()
                     new_reminder_id = new_reminder.reminder_id
+                    logger.debug(f"Created new reminder {new_reminder_id} for topic '{topic.topic_name}' at {topic.next_review.isoformat()}")
                 else:
                     topic.is_completed = True
                     topic.next_review = None
+                    logger.debug(f"Topic '{topic.topic_name}' marked as completed")
                 session.delete(reminder)
                 session.commit()
                 logger.debug(f"Completed reminder {reminder_id} for topic '{topic.topic_name}' (id: {topic.topic_id}), "
