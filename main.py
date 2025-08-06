@@ -8,7 +8,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import Database
@@ -478,7 +480,8 @@ async def schedule_existing_reminders(application):
 
 async def main():
     try:
-        application = Application.builder().token("7738984853:AAFPMeEKwI0tCMSestibVZJqypF5q6egCpk").build()
+        load_dotenv()
+        application = Application.builder().token(os.getenv("BOT_TOKEN")).build()
 
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("tz", handle_timezone))
