@@ -40,7 +40,7 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 # Основная клавиатура
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [["Мой прогресс", "Добавить тему", "Удалить тему"]],
+    [["Мой прогресс", "Добавить тему"], ["Удалить тему", "Восстановить тему"]],
     resize_keyboard=True
 )
 
@@ -50,9 +50,7 @@ def parse_utc_offset(text: str) -> str:
     Возвращает None, если формат неверный или смещение вне диапазона [-12, +14].
     """
     text = text.strip().replace(" ", "").upper()
-    # Удаляем 'UTC' если есть
     text = text.replace("UTC", "")
-    # Проверяем формат: +N, -N, или просто число
     match = re.match(r'^([+-]?)(\d{1,2})$', text)
     if not match:
         return None
@@ -61,7 +59,6 @@ def parse_utc_offset(text: str) -> str:
         offset = int(sign + offset)
         if not -12 <= offset <= 14:
             return None
-        # Инвертируем знак для Etc/GMT (UTC+8 -> Etc/GMT-8)
         return f"Etc/GMT{'+' if offset < 0 else '-'}{abs(offset)}"
     except ValueError:
         return None
@@ -246,6 +243,65 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=MAIN_KEYBOARD
             )
             context.user_data["state"] = None
+    elif data.startswith("restore:"):
+        deleted_topic_id = int(data.split("restore:")[1])
+        user = db.get_user(user_id)
+        try:
+            # Восстанавливаем тему
+            result = db.restore_topic(deleted_topic_id, user_id, user.timezone)
+            if result:
+                topic_id, topic_name = result
+                # Планируем новое напоминание
+                tz = pytz.timezone(user.timezone)
+                now = datetime.now(tz).astimezone(tz)
+                reminders = db.get_reminders(user_id, user.timezone)
+                reminder = next((r for r in reminders if r.topic_id == topic_id), None)
+                if reminder:
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=reminder.scheduled_time.astimezone(tz),
+                        args=[context, user_id, topic_name, reminder.reminder_id],
+                        id=f"reminder_{reminder.reminder_id}_{user_id}",
+                        timezone=tz
+                    )
+                    logger.debug(
+                        f"Scheduled reminder {reminder.reminder_id} for restored topic '{topic_name}' at {reminder.scheduled_time.isoformat()}"
+                    )
+                await query.message.reply_text(
+                    f"Тема '{topic_name}' восстановлена! 😺 Первое повторение через 1 час.",
+                    reply_markup=MAIN_KEYBOARD
+                )
+                # Обновляем список удалённых тем
+                deleted_topics = db.get_deleted_topics(user_id)
+                if deleted_topics:
+                    keyboard = [
+                        [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.deleted_topic_id}")]
+                        for topic in deleted_topics
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.message.edit_reply_markup(reply_markup=reply_markup)
+                    logger.debug(f"Updated keyboard for user {user_id} after restoring topic {topic_id}")
+                else:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                    await query.message.reply_text(
+                        "У тебя больше нет удалённых тем! 😺",
+                        reply_markup=MAIN_KEYBOARD
+                    )
+                    logger.debug(f"No deleted topics left for user {user_id}, removed keyboard")
+                context.user_data["state"] = None
+            else:
+                await query.message.reply_text(
+                    "Тема не найдена. 😿 Попробуй снова с помощью 'Восстановить тему'.",
+                    reply_markup=MAIN_KEYBOARD
+                )
+                context.user_data["state"] = None
+        except Exception as e:
+            logger.error(f"Error restoring topic {deleted_topic_id} for user {user_id}: {e}")
+            await query.message.reply_text(
+                "Ой, что-то пошло не так при восстановлении темы. 😔 Попробуй снова!",
+                reply_markup=MAIN_KEYBOARD
+            )
     elif data.startswith("repeated:"):
         reminder_id = int(data.split("repeated:")[1])
         try:
@@ -391,6 +447,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["state"] = "awaiting_topic_deletion"
         logger.debug(f"User {user_id} prompted to select topic for deletion")
+    elif text == "Восстановить тему":
+        logger.debug(f"User {user_id} requested to restore topic")
+        deleted_topics = db.get_deleted_topics(user_id)
+        if not deleted_topics:
+            await update.message.reply_text(
+                "У тебя нет удалённых тем для восстановления! 😺",
+                reply_markup=MAIN_KEYBOARD
+            )
+            return
+        keyboard = [
+            [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.deleted_topic_id}")]
+            for topic in deleted_topics
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Выбери тему для восстановления:", reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_topic_restoration"
+        logger.debug(f"User {user_id} prompted to select topic for restoration")
     elif text == "Отмена":
         context.user_data["state"] = None
         await update.message.reply_text(

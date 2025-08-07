@@ -166,6 +166,56 @@ class Database:
             logger.error(f"Error fetching topics for user {user_id}: {e}")
             raise
 
+    def get_deleted_topics(self, user_id: int):
+        try:
+            with self.Session() as session:
+                deleted_topics = session.query(DeletedTopic).filter_by(user_id=user_id).all()
+                logger.debug(f"Found {len(deleted_topics)} deleted topics for user {user_id}")
+                return deleted_topics
+        except Exception as e:
+            logger.error(f"Error fetching deleted topics for user {user_id}: {e}")
+            raise
+
+    def restore_topic(self, deleted_topic_id: int, user_id: int, timezone: str):
+        try:
+            with self.Session() as session:
+                deleted_topic = session.query(DeletedTopic).filter_by(deleted_topic_id=deleted_topic_id, user_id=user_id).first()
+                if not deleted_topic:
+                    logger.warning(f"Deleted topic {deleted_topic_id} not found for user {user_id}")
+                    return None
+                topic_name = deleted_topic.topic_name
+                tz = pytz.timezone(timezone)
+                now = datetime.now(tz).astimezone(tz)
+                # Создаём новую тему
+                topic = Topic(
+                    user_id=user_id,
+                    topic_name=topic_name,
+                    created_at=now,
+                    next_review=now + timedelta(hours=1),
+                    repetition_stage=0,
+                    completed_repetitions=0,
+                    is_completed=False
+                )
+                session.add(topic)
+                session.flush()
+                topic_id = topic.topic_id
+                # Создаём новое напоминание
+                reminder = Reminder(
+                    topic_id=topic_id,
+                    user_id=user_id,
+                    scheduled_time=now + timedelta(hours=1)
+                )
+                session.add(reminder)
+                # Удаляем из deleted_topics
+                session.delete(deleted_topic)
+                session.commit()
+                logger.debug(f"Topic '{topic_name}' restored for user {user_id} with topic_id {topic_id}, first review: {topic.next_review.isoformat()}")
+                return topic_id, topic_name
+        except Exception as e:
+            logger.error(f"Error restoring topic {deleted_topic_id} for user {user_id}: {e}")
+            session.rollback()
+            raise
+
     def get_topic(self, topic_id: int, user_id: int, timezone: str):
         try:
             with self.Session() as session:
@@ -276,9 +326,7 @@ class Database:
             with self.Session() as session:
                 topic = session.query(Topic).filter_by(topic_id=topic_id, user_id=user_id).first()
                 if topic:
-                    # Удаляем все напоминания, связанные с этой темой
                     session.query(Reminder).filter_by(topic_id=topic_id, user_id=user_id).delete()
-                    # Переносим тему в deleted_topics
                     deleted_topic = DeletedTopic(
                         topic_id=topic_id,
                         user_id=user_id,
