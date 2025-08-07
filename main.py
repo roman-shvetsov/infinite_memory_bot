@@ -1,4 +1,6 @@
 import logging
+import os
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -8,20 +10,29 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import os
+from telegram.error import InvalidToken
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import Database
 import asyncio
 from aiohttp import web
+from dotenv import load_dotenv
 
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
+
+# Загрузка переменных окружения
+load_dotenv()
+
+# Проверка токена
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN environment variable is not set")
+    raise ValueError("BOT_TOKEN environment variable is not set")
 
 # Инициализация базы данных и планировщика
 db = Database()
@@ -32,6 +43,28 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [["Мой прогресс", "Добавить тему", "Удалить тему"]],
     resize_keyboard=True
 )
+
+def parse_utc_offset(text: str) -> str:
+    """
+    Преобразует UTC-смещение (например, 'UTC+8', '+8', '-6') в формат часового пояса (например, 'Etc/GMT-8').
+    Возвращает None, если формат неверный или смещение вне диапазона [-12, +14].
+    """
+    text = text.strip().replace(" ", "").upper()
+    # Удаляем 'UTC' если есть
+    text = text.replace("UTC", "")
+    # Проверяем формат: +N, -N, или просто число
+    match = re.match(r'^([+-]?)(\d{1,2})$', text)
+    if not match:
+        return None
+    sign, offset = match.groups()
+    try:
+        offset = int(sign + offset)
+        if not -12 <= offset <= 14:
+            return None
+        # Инвертируем знак для Etc/GMT (UTC+8 -> Etc/GMT-8)
+        return f"Etc/GMT{'+' if offset < 0 else '-'}{abs(offset)}"
+    except ValueError:
+        return None
 
 async def health_check(request):
     """
@@ -49,14 +82,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         await update.message.reply_text(
             f"Твой текущий часовой пояс: {user.timezone}\n"
-            "Хочешь изменить его? Выбери новый часовой пояс с помощью /tz или напиши его (например, 'Europe/Moscow').",
+            "Хочешь изменить его? Выбери новый часовой пояс с помощью /tz или напиши его (например, 'Europe/Moscow' или 'UTC+8').",
             reply_markup=MAIN_KEYBOARD
         )
     else:
         await update.message.reply_text(
             "Привет! 😊 Я помогу тебе повторять темы по кривой забывания. "
             "Выбери свой часовой пояс, отправив его название (например, 'Europe/Moscow' для МСК (+3)) "
-            "или напиши /tz для выбора.",
+            "или смещение (например, 'UTC+8'), или напиши /tz для выбора.",
             reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
         )
     logger.debug(f"Sent start response to user {update.effective_user.id}")
@@ -65,7 +98,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     context.user_data["state"] = None
     await update.message.reply_text(
-        "Состояние сброшено! 😺 Выбери команду:",
+        "Состояние сброшено! 😺",
         reply_markup=MAIN_KEYBOARD
     )
     logger.debug(f"User {user_id} reset state")
@@ -78,25 +111,39 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "list":
         await update.message.reply_text(
             "Полный список часовых поясов: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones\n"
-            "Отправь название, например, 'Europe/Moscow'.",
+            "Отправь название (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8').",
             reply_markup=MAIN_KEYBOARD
         )
         return
 
     if text:
+        timezone = parse_utc_offset(text)
+        if timezone:
+            try:
+                pytz.timezone(timezone)
+                db.save_user(user_id, update.effective_user.username or "", timezone)
+                logger.debug(f"User {user_id} saved with timezone {timezone} (from UTC offset {text})")
+                await update.message.reply_text(
+                    f"Часовой пояс {timezone} (UTC{text}) сохранен! 😺",
+                    reply_markup=MAIN_KEYBOARD
+                )
+                context.user_data["state"] = None
+                return
+            except Exception as e:
+                logger.error(f"Error validating UTC timezone {timezone}: {str(e)}")
         try:
             pytz.timezone(text)
             db.save_user(user_id, update.effective_user.username or "", text)
             logger.debug(f"User {user_id} saved with timezone {text}")
             await update.message.reply_text(
-                f"Часовой пояс {text} сохранен! 😺 Теперь ты можешь добавлять темы!",
+                f"Часовой пояс {text} сохранен! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             context.user_data["state"] = None
         except Exception as e:
             logger.error(f"Error saving user timezone: {str(e)}")
             await update.message.reply_text(
-                "Ой, что-то не так с часовым поясом. 😔 Попробуй другой формат (например, 'Europe/Moscow') или напиши /tz для выбора.",
+                "Ой, что-то не так с часовым поясом. 😔 Попробуй название (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8').",
                 reply_markup=MAIN_KEYBOARD
             )
         return
@@ -114,7 +161,7 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Выбери часовой пояс или введи его вручную (например, 'Europe/Moscow'):",
+        "Выбери часовой пояс или введи его вручную (например, 'Europe/Moscow' или 'UTC+8'):",
         reply_markup=reply_markup
     )
     context.user_data["state"] = "awaiting_timezone"
@@ -132,7 +179,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         timezone = data.split("tz:")[1]
         if timezone == "manual":
             await query.message.reply_text(
-                "Отправь название часового пояса (например, 'Europe/Moscow') или посмотри полный список: /tz list",
+                "Отправь название часового пояса (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8'):",
                 reply_markup=MAIN_KEYBOARD
             )
             context.user_data["state"] = "awaiting_timezone"
@@ -142,7 +189,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 db.save_user(user_id, update.effective_user.username or "", timezone)
                 logger.debug(f"User {user_id} saved with timezone {timezone}")
                 await query.message.reply_text(
-                    f"Часовой пояс {timezone} сохранен! 😺 Теперь ты можешь добавлять темы!",
+                    f"Часовой пояс {timezone} сохранен! 😺",
                     reply_markup=MAIN_KEYBOARD
                 )
                 context.user_data["state"] = None
@@ -157,18 +204,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         topic = db.get_topic(topic_id, user_id, db.get_user(user_id).timezone)
         if topic:
             try:
-                # Удаляем все запланированные напоминания для этой темы
                 reminders = db.get_reminders(user_id, db.get_user(user_id).timezone)
                 for reminder in reminders:
                     if reminder.topic_id == topic_id:
-                        scheduler.remove_job(f"reminder_{reminder.reminder_id}_{user_id}")
-                        logger.debug(f"Removed scheduled job reminder_{reminder.reminder_id}_{user_id} for topic {topic_id}")
+                        try:
+                            scheduler.remove_job(f"reminder_{reminder.reminder_id}_{user_id}")
+                            logger.debug(f"Removed scheduled job reminder_{reminder.reminder_id}_{user_id} for topic {topic_id}")
+                        except Exception as e:
+                            logger.warning(f"Could not remove job reminder_{reminder.reminder_id}_{user_id}: {e}")
                 db.delete_topic(topic_id, user_id, topic.topic_name)
                 await query.message.reply_text(
                     f"Тема '{topic.topic_name}' перенесена в удалённые! 😺",
                     reply_markup=MAIN_KEYBOARD
                 )
-                # Обновляем клавиатуру, удаляя кнопку удалённой темы
                 topics = db.get_active_topics(user_id, db.get_user(user_id).timezone)
                 if topics:
                     keyboard = [
@@ -209,15 +257,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=MAIN_KEYBOARD
                 )
                 return
-            # Проверяем, существует ли напоминание
             reminder = db.get_reminder(reminder_id, user_id, user.timezone)
             if not reminder:
                 logger.warning(f"Reminder {reminder_id} not found for user {user_id}, checking topic progress")
-                # Проверяем, была ли тема обновлена
                 topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
                 if topic and topic.completed_repetitions > 0:
                     await query.message.reply_text(
-                        f"Повторение для темы '{topic.topic_name}' уже засчитано! 😺 Проверь прогресс с помощью 'Мой прогресс'.",
+                        f"Повторение для темы '{topic.topic_name}' уже засчитано! 😺",
                         reply_markup=MAIN_KEYBOARD
                     )
                 else:
@@ -280,24 +326,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("state") == "awaiting_timezone":
         logger.debug(f"User {user_id} sent timezone: {text}")
+        timezone = parse_utc_offset(text)
+        if timezone:
+            try:
+                pytz.timezone(timezone)
+                db.save_user(user_id, update.effective_user.username or "", timezone)
+                logger.debug(f"User {user_id} saved with timezone {timezone} (from UTC offset {text})")
+                await update.message.reply_text(
+                    f"Часовой пояс {timezone} (UTC{text}) сохранен! 😺",
+                    reply_markup=MAIN_KEYBOARD
+                )
+                context.user_data["state"] = None
+                return
+            except Exception as e:
+                logger.error(f"Error validating UTC timezone {timezone}: {str(e)}")
         try:
             pytz.timezone(text)
             db.save_user(user_id, update.effective_user.username or "", text)
             logger.debug(f"User {user_id} saved with timezone {text}")
             await update.message.reply_text(
-                f"Часовой пояс {text} сохранен! 😺 Теперь ты можешь добавлять темы!",
+                f"Часовой пояс {text} сохранен! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             context.user_data["state"] = None
         except Exception as e:
             logger.error(f"Error saving user timezone: {str(e)}")
             await update.message.reply_text(
-                "Ой, что-то не так с часовым поясом. 😔 Попробуй другой формат (например, 'Europe/Moscow') или напиши /tz для выбора.",
+                "Ой, что-то не так с часовым поясом. 😔 Попробуй название (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8').",
                 reply_markup=MAIN_KEYBOARD
             )
         return
 
-    if text == "Мой прогресс":
+    if text.startswith("Повторил "):
+        logger.debug(f"User {user_id} sent repeat command: {text}")
+        topic_name = text[len("Повторил "):].strip()
+        await mark_repeated(update, context, topic_name)
+    elif text == "Мой прогресс":
         logger.debug(f"User {user_id} requested progress")
         await show_progress(update, context)
     elif text == "Добавить тему":
@@ -330,7 +394,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "Отмена":
         context.user_data["state"] = None
         await update.message.reply_text(
-            "Действие отменено! 😺 Выбери команду:",
+            "Действие отменено! 😺",
             reply_markup=MAIN_KEYBOARD
         )
         logger.debug(f"User {user_id} cancelled action")
@@ -339,7 +403,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await add_new_topic(update, context, text)
     else:
         await update.message.reply_text(
-            "Неизвестная команда. 😿 Выбери команду:",
+            "Неизвестная команда. 😿",
+            reply_markup=MAIN_KEYBOARD
+        )
+
+async def mark_repeated(update: Update, context: ContextTypes.DEFAULT_TYPE, topic_name: str):
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    tz = pytz.timezone(user.timezone)
+
+    topic = db.get_topic_by_name(user_id, topic_name, user.timezone)
+    if not topic:
+        await update.message.reply_text(
+            f"Тема '{topic_name}' не найдена. 😿 Проверь название или выбери 'Мой прогресс'.",
+            reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    try:
+        reminders = db.get_reminders(user_id, user.timezone)
+        reminder = next((r for r in reminders if r.topic_id == topic.topic_id), None)
+        if not reminder:
+            await update.message.reply_text(
+                f"Для темы '{topic_name}' нет активных напоминаний. 😿",
+                reply_markup=MAIN_KEYBOARD
+            )
+            return
+
+        result = db.complete_reminder(reminder.reminder_id, user_id, user.timezone)
+        if result:
+            topic, new_reminder_id = result
+            if new_reminder_id:
+                scheduler.add_job(
+                    send_reminder,
+                    "date",
+                    run_date=topic.next_review.astimezone(tz),
+                    args=[context, user_id, topic.topic_name, new_reminder_id],
+                    id=f"reminder_{new_reminder_id}_{user_id}",
+                    timezone=tz
+                )
+                logger.debug(
+                    f"Scheduled new reminder {new_reminder_id} for topic '{topic.topic_name}' at {topic.next_review.isoformat()}"
+                )
+            next_review = topic.next_review.astimezone(tz) if topic.next_review else None
+            await update.message.reply_text(
+                f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
+                f"Завершено: {topic.completed_repetitions}/6 повторений\n"
+                f"Следующее повторение: {next_review.strftime('%d.%m.%Y %H:%M') if next_review else 'нет'}",
+                reply_markup=MAIN_KEYBOARD
+            )
+            logger.debug(f"User {user_id} marked topic '{topic_name}' as repeated")
+        else:
+            await update.message.reply_text(
+                f"Ой, что-то пошло не так при отметке повторения темы '{topic_name}'. 😿 Попробуй снова!",
+                reply_markup=MAIN_KEYBOARD
+            )
+    except Exception as e:
+        logger.error(f"Error marking topic '{topic_name}' as repeated for user {user_id}: {str(e)}")
+        await update.message.reply_text(
+            "Ой, что-то пошло не так при отметке повторения. 😔 Попробуй снова!",
             reply_markup=MAIN_KEYBOARD
         )
 
@@ -358,10 +480,12 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, topic_
             reply_markup=reply_markup
         )
         logger.debug(f"Reminder {reminder_id} sent for topic '{topic_name}' to user {user_id}")
+    except InvalidToken:
+        logger.error(f"Invalid token when sending reminder {reminder_id} to user {user_id} for topic '{topic_name}'")
     except Exception as e:
         logger.error(f"Error sending reminder {reminder_id} to user {user_id} for topic '{topic_name}': {str(e)}")
 
-async def check_missed_reminders(application):
+async def check_missed_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         users = db.get_all_users()
         current_time = datetime.now(pytz.UTC)
@@ -372,7 +496,7 @@ async def check_missed_reminders(application):
                 topic = db.get_topic(reminder.topic_id, user.user_id, user.timezone)
                 if topic and not topic.is_completed and reminder.scheduled_time <= current_time:
                     logger.debug(f"Missed reminder {reminder.reminder_id} for topic '{topic.topic_name}' for user {user.user_id}, sending now")
-                    await send_reminder(application, user.user_id, topic.topic_name, reminder.reminder_id)
+                    await send_reminder(context, user.user_id, topic.topic_name, reminder.reminder_id)
     except Exception as e:
         logger.error(f"Error checking missed reminders: {str(e)}")
 
@@ -387,9 +511,8 @@ async def add_new_topic(update: Update, context: ContextTypes.DEFAULT_TYPE, topi
         logger.debug(f"Topic '{topic_name}' added for user {user_id}")
 
         tz = pytz.timezone(timezone)
-        # Получаем только одно напоминание для новой темы
-        reminder = db.get_reminders(user_id, timezone)
-        reminder = next((r for r in reminder if r.topic_id == topic_id), None)
+        reminders = db.get_reminders(user_id, timezone)
+        reminder = next((r for r in reminders if r.topic_id == topic_id), None)
         if reminder:
             scheduler.add_job(
                 send_reminder,
@@ -421,12 +544,11 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tz = pytz.timezone(user.timezone)
     topics = db.get_active_topics(user_id, user.timezone)
 
-    # Sort topics by created_at in ascending order (oldest first)
     topics = sorted(topics, key=lambda topic: topic.created_at)
 
     if not topics:
         await update.message.reply_text(
-            "У тебя пока нет активных тем! 😿 Добавь новую с помощью 'Добавить тему'.",
+            "У тебя пока нет активных тем! 😿",
             reply_markup=MAIN_KEYBOARD
         )
         logger.debug(f"No active topics found for user {user_id}")
@@ -438,8 +560,10 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Topic {topic.topic_name}: next_review={topic.next_review.isoformat() if topic.next_review else 'None'}"
         )
         next_review = topic.next_review.astimezone(tz) if topic.next_review else None
+        last_reviewed = topic.last_reviewed.astimezone(tz) if topic.last_reviewed else None
         progress_text += (
             f"📖 Тема: {topic.topic_name}\n"
+            f"⏰ Последнее повторение: {'нет' if not last_reviewed else last_reviewed.strftime('%d.%m.%Y %H:%M')}\n"
             f"⏰ Следующее повторение: {next_review.strftime('%d.%m.%Y %H:%M') if next_review else 'нет'}\n"
             f"✅ Завершено: {topic.completed_repetitions}/6 повторений\n\n"
             f"---\n"
@@ -459,11 +583,9 @@ async def schedule_existing_reminders(application):
                 topic = db.get_topic(reminder.topic_id, user.user_id, user.timezone)
                 if topic and not topic.is_completed:
                     if reminder.scheduled_time <= current_time:
-                        # Send missed reminder immediately
                         logger.debug(f"Missed reminder {reminder.reminder_id} for topic '{topic.topic_name}' for user {user.user_id}, sending now")
                         await send_reminder(application, user.user_id, topic.topic_name, reminder.reminder_id)
                     else:
-                        # Schedule future reminders
                         scheduler.add_job(
                             send_reminder,
                             "date",
@@ -475,13 +597,23 @@ async def schedule_existing_reminders(application):
                         logger.debug(
                             f"Scheduled reminder {reminder.reminder_id} for topic {topic.topic_name} at {reminder.scheduled_time.isoformat()}"
                         )
+            scheduler.add_job(
+                check_missed_reminders,
+                "cron",
+                hour=10,
+                minute=0,
+                timezone=tz,
+                args=[application],
+                id=f"daily_check_missed_reminders_{user.user_id}"
+            )
+            logger.debug(f"Scheduled daily missed reminder check for user {user.user_id} at 10:00 {user.timezone}")
     except Exception as e:
         logger.error(f"Error scheduling existing reminders: {str(e)}")
 
 async def main():
+    runner = None
     try:
-        load_dotenv()
-        application = Application.builder().token(os.getenv("BOT_TOKEN")).build()
+        application = Application.builder().token(BOT_TOKEN).build()
 
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("tz", handle_timezone))
@@ -489,7 +621,6 @@ async def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(handle_callback_query))
 
-        # Настройка HTTP-сервера для health check
         app = web.Application()
         app.router.add_route('GET', '/health', health_check)
         app.router.add_route('HEAD', '/health', health_check)
@@ -501,21 +632,6 @@ async def main():
 
         scheduler.start()
         logger.debug("Scheduler started")
-
-        # Schedule daily check for missed reminders at 10 AM in each user's timezone
-        users = db.get_all_users()
-        for user in users:
-            tz = pytz.timezone(user.timezone)
-            scheduler.add_job(
-                check_missed_reminders,
-                "cron",
-                hour=10,
-                minute=0,
-                timezone=tz,
-                args=[application],
-                id=f"daily_check_missed_reminders_{user.user_id}"
-            )
-            logger.debug(f"Scheduled daily missed reminder check for user {user.user_id} at 10:00 {user.timezone}")
 
         await schedule_existing_reminders(application)
 
@@ -535,10 +651,19 @@ async def main():
             scheduler.shutdown(wait=False)
             logger.debug("Scheduler, application, and health check server shut down successfully")
 
+    except InvalidToken as e:
+        logger.error(f"Invalid token error: {str(e)}")
+        if runner:
+            await runner.cleanup()
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+        raise
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
-        await runner.cleanup() if 'runner' in locals() else None
-        scheduler.shutdown(wait=False)
+        if runner:
+            await runner.cleanup()
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         raise
 
 if __name__ == "__main__":
