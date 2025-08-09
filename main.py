@@ -46,7 +46,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-
 def parse_utc_offset(text: str) -> str:
     """
     Преобразует UTC-смещение (например, 'UTC+8', '+8', '-6') в формат часового пояса (например, 'Etc/GMT-8').
@@ -66,7 +65,6 @@ def parse_utc_offset(text: str) -> str:
     except ValueError:
         return None
 
-
 async def health_check(request):
     """
     Обработка GET и HEAD запросов для /health.
@@ -76,7 +74,6 @@ async def health_check(request):
     if request.method == "HEAD":
         return web.Response(status=200)
     return web.json_response({"status": "ok"})
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Received /start command from user {update.effective_user.id}")
@@ -102,7 +99,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     logger.debug(f"Sent start response to user {update.effective_user.id}")
 
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет подробное описание бота и его функционала."""
     user_id = update.effective_user.id
@@ -115,9 +111,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **Что я умею?**\n"
         "✅ **Добавлять темы**: Создавай темы для изучения и распределяй их по категориям.\n"
         "✅ **Напоминать о повторении**: Я отправлю напоминания в твоём часовом поясе, чтобы ты повторял темы по оптимальному графику (6 повторений для закрепления).\n"
-        "✅ **Показывать прогресс**: Отслеживай, сколько повторений завершено для каждой темы, с удобной прогресс-баром!\n"
+        "✅ **Показывать прогресс**: Отслеживай, сколько повторений завершено для каждой темы, включая завершённые, с удобной прогресс-баром!\n"
         "✅ **Управлять категориями**: Создавай, переименовывай, удаляй категории или перемещай темы между ними.\n"
-        "✅ **Удалять и восстанавливать темы**: Случайно удалил тему? Не проблема, её можно восстановить!\n"
+        "✅ **Удалять темы**: Удалённые темы исчезают навсегда, так что будь осторожен!\n"
+        "✅ **Восстанавливать завершённые темы**: Завершил все 6 повторений? Поздравляю! Ты можешь восстановить тему через 'Восстановить тему', чтобы начать заново.\n"
         "✅ **Настраивать часовой пояс**: Укажи свой часовой пояс, чтобы напоминания приходили вовремя.\n\n"
         "🛠 **Как пользоваться?**\n"
         "🔹 **/start** — Начать работу с ботом и установить часовой пояс.\n"
@@ -125,10 +122,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 **/help** — Показать это сообщение.\n"
         "🔹 **/reset** — Сбросить текущее состояние (если что-то пошло не так).\n"
         "🔹 **Кнопки главного меню**:\n"
-        "   - *Мой прогресс*: Посмотреть прогресс по темам и категориям.\n"
+        "   - *Мой прогресс*: Посмотреть прогресс по темам и категориям, включая завершённые темы.\n"
         "   - *Добавить тему*: Создать новую тему и выбрать для неё категорию.\n"
-        "   - *Удалить тему*: Удалить тему (можно восстановить).\n"
-        "   - *Восстановить тему*: Вернуть удалённую тему.\n"
+        "   - *Удалить тему*: Удалить тему навсегда (восстановить нельзя).\n"
+        "   - *Восстановить тему*: Восстановить завершённую тему для повторного изучения.\n"
         "   - *Категории*: Создать, переименовать, удалить категории или перенести темы.\n"
         "🔹 Напиши **'Повторил <название темы>'**, чтобы отметить повторение вручную.\n\n"
         "⏰ **Часовой пояс**\n"
@@ -144,7 +141,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     logger.debug(f"Sent help response to user {user_id}")
 
-
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     context.user_data["state"] = None
@@ -154,7 +150,6 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=MAIN_KEYBOARD
     )
     logger.debug(f"User {user_id} reset state")
-
 
 async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -220,6 +215,114 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["state"] = "awaiting_timezone"
     logger.debug(f"User {user_id} prompted to select timezone")
 
+async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text(
+            "Пожалуйста, сначала выбери часовой пояс с помощью /start или /tz.",
+            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
+        )
+        return
+    categories = db.get_categories(user_id)
+    keyboard = [
+        [InlineKeyboardButton(category.category_name, callback_data=f"category_progress:{category.category_id}")]
+        for category in categories
+    ]
+    keyboard.append([InlineKeyboardButton("📁 Без категории", callback_data="category_progress:none")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Выбери категорию для просмотра прогресса:",
+        reply_markup=reply_markup
+    )
+    context.user_data["state"] = "awaiting_category_progress"
+    logger.debug(f"User {user_id} requested progress, showing category selection")
+
+
+async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: Optional[int],
+                                 timezone: str):
+    user_id = update.effective_user.id
+    logger.debug(f"User {user_id} requested progress for category {category_id}")
+    topics = db.get_active_topics(user_id, timezone, category_id=category_id)
+    total_repetitions = 6
+    category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+
+    if not topics:
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="back_to_progress")]])
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                f"В категории '{category_name}' пока нет тем! 😿",
+                reply_markup=reply_markup
+            )
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(
+                f"В категории '{category_name}' пока нет тем! 😿",
+                reply_markup=reply_markup
+            )
+        return
+
+    tz = pytz.timezone(timezone)
+    message = f"📚 {category_name} ({timezone}) 😺\n\n"
+    for topic in topics:
+        progress_percentage = (topic.completed_repetitions / total_repetitions) * 100
+        progress_bar = "█" * int(topic.completed_repetitions) + "░" * (total_repetitions - topic.completed_repetitions)
+        status = "Завершено" if topic.is_completed else f"{topic.next_review.astimezone(tz).strftime('%d.%m.%Y %H:%M')}" if topic.next_review else "Завершено"
+        message += (
+            f"📖 {topic.topic_name}\n"
+            f"⏰ Следующее: {status}\n"
+            f"✅ Прогресс: {progress_bar} {topic.completed_repetitions}/{total_repetitions} ({progress_percentage:.1f}%)\n"
+            f"──────────\n"
+        )
+
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="back_to_progress")]])
+    try:
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                message,
+                reply_markup=reply_markup
+            )
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(
+                message,
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logger.error(f"Error sending category progress for user {user_id}, category {category_id}: {str(e)}")
+        error_message = "Ой, что-то пошло не так при отображении прогресса! 😿 Попробуй снова или используй /reset."
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                error_message,
+                reply_markup=MAIN_KEYBOARD
+            )
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(
+                error_message,
+                reply_markup=MAIN_KEYBOARD
+            )
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, topic_name: str, reminder_id: int):
+    user = db.get_user(user_id)
+    if not user:
+        logger.warning(f"User {user_id} not found for reminder {reminder_id}")
+        return
+    try:
+        topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+        if not topic:
+            logger.warning(f"Topic for reminder {reminder_id} not found for user {user_id}")
+            return
+        keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"⏰ Пора повторить тему '{topic_name}'! 😺",
+            reply_markup=reply_markup
+        )
+        logger.debug(f"Sent reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
+    except Exception as e:
+        logger.error(f"Error sending reminder {reminder_id} to user {user_id}: {str(e)}")
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -274,14 +377,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             )
                         except Exception as e:
                             logger.warning(f"Could not remove job reminder_{reminder.reminder_id}_{user_id}: {e}")
-                db.delete_topic(topic_id, user_id, topic.topic_name)
+                db.delete_topic(topic_id, user_id)
                 await query.message.reply_text(
-                    f"Тема '{topic.topic_name}' перенесена в удалённые! 😺",
+                    f"Тема '{topic.topic_name}' удалена навсегда! 😺",
                     reply_markup=MAIN_KEYBOARD
                 )
                 await query.message.edit_reply_markup(reply_markup=None)
                 context.user_data["state"] = None
-                logger.debug(f"User {user_id} deleted topic {topic_id}, keyboard removed")
+                logger.debug(f"User {user_id} permanently deleted topic {topic_id}, keyboard removed")
             except Exception as e:
                 logger.error(f"Error deleting topic {topic_id} for user {user_id}: {e}")
                 await query.message.reply_text(
@@ -295,7 +398,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
             context.user_data["state"] = None
     elif data.startswith("restore:"):
-        deleted_topic_id = int(data.split("restore:")[1])
+        completed_topic_id = int(data.split("restore:")[1])
         user = db.get_user(user_id)
         if not user:
             await query.message.reply_text(
@@ -305,7 +408,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer()
             return
         try:
-            result = db.restore_topic(deleted_topic_id, user_id, user.timezone)
+            result = db.restore_topic(completed_topic_id, user_id, user.timezone)
             if result:
                 topic_id, topic_name = result
                 tz = pytz.timezone(user.timezone)
@@ -328,11 +431,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     f"Тема '{topic_name}' восстановлена! 😺 Первое повторение через 1 час.",
                     reply_markup=MAIN_KEYBOARD
                 )
-                deleted_topics = db.get_deleted_topics(user_id)
-                if deleted_topics:
+                completed_topics = db.get_completed_topics(user_id)
+                if completed_topics:
                     keyboard = [
-                        [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.deleted_topic_id}")]
-                        for topic in deleted_topics
+                        [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.completed_topic_id}")]
+                        for topic in completed_topics
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await query.message.edit_reply_markup(reply_markup=reply_markup)
@@ -340,10 +443,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 else:
                     await query.message.edit_reply_markup(reply_markup=None)
                     await query.message.reply_text(
-                        "У тебя больше нет удалённых тем! 😺",
+                        "У тебя больше нет завершённых тем для восстановления! 😺",
                         reply_markup=MAIN_KEYBOARD
                     )
-                    logger.debug(f"No deleted topics left for user {user_id}, removed keyboard")
+                    logger.debug(f"No completed topics left for user {user_id}, removed keyboard")
                 context.user_data["state"] = None
             else:
                 await query.message.reply_text(
@@ -352,7 +455,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 context.user_data["state"] = None
         except Exception as e:
-            logger.error(f"Error restoring topic {deleted_topic_id} for user {user_id}: {e}")
+            logger.error(f"Error restoring completed topic {completed_topic_id} for user {user_id}: {e}")
             await query.message.reply_text(
                 "Ой, что-то пошло не так при восстановлении темы. 😔 Попробуй снова!",
                 reply_markup=MAIN_KEYBOARD
@@ -377,7 +480,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton(category.category_name, callback_data=f"category_progress:{category.category_id}")]
             for category in categories
         ]
-        keyboard.append([InlineKeyboardButton("Без категории", callback_data="category_progress:none")])
+        keyboard.append([InlineKeyboardButton("📁 Без категории", callback_data="category_progress:none")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(
             "Выбери категорию для просмотра прогресса:",
@@ -424,7 +527,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             topics = db.get_active_topics(user_id, user.timezone, category_id='all')
             if not topics:
                 await query.message.reply_text(
-                    "У тебя нет активных тем для переноса! 😿",
+                    "У тебя нет тем для переноса! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
                 context.user_data["state"] = None
@@ -479,18 +582,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             category = db.get_category(category_id, user_id)
             if category:
-                # Получаем все активные темы в категории
                 topics = db.get_active_topics(user_id, user.timezone, category_id=category_id)
                 moved_topics = []
                 if topics:
-                    # Переносим темы в "Без категории"
                     for topic in topics:
                         db.move_topic_to_category(topic.topic_id, user_id, None)
                         moved_topics.append(topic.topic_name)
                         logger.debug(f"Moved topic '{topic.topic_name}' to 'Без категории' for user {user_id}")
-                # Удаляем категорию
                 db.delete_category(category_id, user_id)
-                # Формируем сообщение о результате
                 if moved_topics:
                     topics_list = ", ".join(f"'{topic}'" for topic in moved_topics)
                     await query.message.reply_text(
@@ -529,7 +628,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             topics = db.get_active_topics(user_id, user.timezone, category_id='all')
             if not topics:
                 await query.message.reply_text(
-                    "У тебя нет активных тем для переноса! 😿",
+                    "У тебя нет тем для переноса! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
                 context.user_data["state"] = None
@@ -697,32 +796,37 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 await query.answer()
                 return
-            if new_reminder_id:
-                tz = pytz.timezone(user.timezone)
-                scheduler.add_job(
-                    send_reminder,
-                    "date",
-                    run_date=next_reminder_time,
-                    args=[context, user_id, topic.topic_name, new_reminder_id],
-                    id=f"reminder_{new_reminder_id}_{user_id}",
-                    timezone=tz
-                )
-                logger.debug(f"Scheduled new reminder {new_reminder_id} for topic '{topic.topic_name}' at {next_reminder_time.isoformat()}")
             total_repetitions = 6
             progress_percentage = (completed_repetitions / total_repetitions) * 100
             progress_bar = "█" * int(completed_repetitions) + "░" * (total_repetitions - completed_repetitions)
-            next_reminder_str = (
-                next_reminder_time.astimezone(tz).strftime("%d.%m.%Y %H:%M")
-                if next_reminder_time
-                else "Завершено"
-            )
-            await query.message.reply_text(
-                f"Тема '{topic.topic_name}' отмечена как повторённая! 😺\n"
-                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                f"Следующее повторение: {next_reminder_str}\n"
-                f"Прогресс: {progress_bar} {progress_percentage:.1f}%",
-                reply_markup=MAIN_KEYBOARD
-            )
+            tz = pytz.timezone(user.timezone)
+            if completed_repetitions < total_repetitions:
+                next_reminder_str = next_reminder_time.astimezone(tz).strftime("%d.%m.%Y %H:%M")
+                if new_reminder_id:
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=next_reminder_time,
+                        args=[context, user_id, topic.topic_name, new_reminder_id],
+                        id=f"reminder_{new_reminder_id}_{user_id}",
+                        timezone=tz
+                    )
+                    logger.debug(f"Scheduled new reminder {new_reminder_id} for topic '{topic.topic_name}' at {next_reminder_time.isoformat()}")
+                await query.message.reply_text(
+                    f"Тема '{topic.topic_name}' отмечена как повторённая! 😺\n"
+                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                    f"Следующее повторение: {next_reminder_str}\n"
+                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%",
+                    reply_markup=MAIN_KEYBOARD
+                )
+            else:
+                await query.message.reply_text(
+                    f"🎉 Поздравляю, ты полностью освоил тему '{topic.topic_name}'! 🏆\n"
+                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
+                    f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺",
+                    reply_markup=MAIN_KEYBOARD
+                )
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer()
             logger.debug(f"User {user_id} marked topic '{topic.topic_name}' as repeated")
@@ -735,7 +839,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer()
     else:
         await query.answer()
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -861,7 +964,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not result:
                 logger.error(f"Topic '{topic_name}' not found for user {user_id}")
                 await update.message.reply_text(
-                    f"Тема '{topic_name}' не найдена. 😿 Попробуй снова!",
+                    f"Тема '{topic_name}' не найдена или уже завершена. 😿 Попробуй снова!",
                     reply_markup=MAIN_KEYBOARD
                 )
                 return
@@ -874,28 +977,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=MAIN_KEYBOARD
                 )
                 return
-            if reminder_id:
-                tz = pytz.timezone(user.timezone)
-                scheduler.add_job(
-                    send_reminder,
-                    "date",
-                    run_date=next_reminder_time,
-                    args=[context, user_id, topic_name, reminder_id],
-                    id=f"reminder_{reminder_id}_{user_id}",
-                    timezone=tz
-                )
-                logger.debug(f"Scheduled new reminder {reminder_id} for topic '{topic_name}' at {next_reminder_time.isoformat()}")
             total_repetitions = 6
             progress_percentage = (completed_repetitions / total_repetitions) * 100
             progress_bar = "█" * int(completed_repetitions) + "░" * (total_repetitions - completed_repetitions)
-            next_reminder_str = next_reminder_time.strftime("%d.%m.%Y %H:%M") if next_reminder_time else "Завершено"
-            await update.message.reply_text(
-                f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
-                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                f"Следующее повторение: {next_reminder_str}\n"
-                f"Прогресс: {progress_bar} {progress_percentage:.1f}%",
-                reply_markup=MAIN_KEYBOARD
-            )
+            tz = pytz.timezone(user.timezone)
+            if completed_repetitions < total_repetitions:
+                next_reminder_str = next_reminder_time.strftime("%d.%m.%Y %H:%M")
+                if reminder_id:
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=next_reminder_time,
+                        args=[context, user_id, topic_name, reminder_id],
+                        id=f"reminder_{reminder_id}_{user_id}",
+                        timezone=tz
+                    )
+                    logger.debug(f"Scheduled new reminder {reminder_id} for topic '{topic_name}' at {next_reminder_time.isoformat()}")
+                await update.message.reply_text(
+                    f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
+                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                    f"Следующее повторение: {next_reminder_str}\n"
+                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%",
+                    reply_markup=MAIN_KEYBOARD
+                )
+            else:
+                await update.message.reply_text(
+                    f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\n"
+                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
+                    f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺",
+                    reply_markup=MAIN_KEYBOARD
+                )
             logger.debug(f"User {user_id} marked topic '{topic_name}' as repeated")
         except Exception as e:
             logger.error(f"Error marking topic '{topic_name}' as repeated for user {user_id}: {str(e)}")
@@ -919,41 +1031,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics = db.get_active_topics(user_id, user.timezone, category_id='all')
         if not topics:
             await update.message.reply_text(
-                "У тебя нет активных тем для удаления! 😿",
+                "У тебя нет тем для удаления! 😿",
                 reply_markup=MAIN_KEYBOARD
             )
             return
         keyboard = [
             [InlineKeyboardButton(
-                f"{topic.topic_name} ({db.get_category(topic.category_id, user_id).category_name if topic.category_id else 'Без категории'})",
+                f"{topic.topic_name} ({db.get_category(topic.category_id, user_id).category_name if topic.category_id else '📁 Без категории'})",
                 callback_data=f"delete:{topic.topic_id}"
             )] for topic in topics
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "Выбери тему для удаления:", reply_markup=reply_markup
+            "Выбери тему для удаления (восстановить будет нельзя):", reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_topic_deletion"
         logger.debug(f"User {user_id} prompted to select topic for deletion")
     elif text == "Восстановить тему":
         logger.debug(f"User {user_id} requested to restore topic")
-        deleted_topics = db.get_deleted_topics(user_id)
-        if not deleted_topics:
+        completed_topics = db.get_completed_topics(user_id)
+        if not completed_topics:
             await update.message.reply_text(
-                "У тебя нет удалённых тем для восстановления! 😺",
+                "У тебя нет завершённых тем для восстановления! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             return
         keyboard = [
-            [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.deleted_topic_id}")]
-            for topic in deleted_topics
+            [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.completed_topic_id}")]
+            for topic in completed_topics
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "Выбери тему для восстановления:", reply_markup=reply_markup
+            "Выбери завершённую тему для восстановления:", reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_topic_restoration"
-        logger.debug(f"User {user_id} prompted to select topic for restoration")
+        logger.debug(f"User {user_id} prompted to select completed topic for restoration")
     elif text == "Категории":
         logger.debug(f"User {user_id} requested categories menu")
         keyboard = [
@@ -1009,218 +1121,99 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD
         )
 
-
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, topic_name: str, reminder_id: int):
-    try:
-        user = db.get_user(user_id)
-        if not user:
-            logger.error(f"User {user_id} not found for reminder {reminder_id}")
-            return
-        logger.debug(f"Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
-        keyboard = [[InlineKeyboardButton("Повторил", callback_data=f"repeated:{reminder_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            user_id,
-            f"Пора повторить тему '{topic_name}'! 😺",
-            reply_markup=reply_markup
-        )
-        logger.debug(f"Reminder {reminder_id} sent for topic '{topic_name}' to user {user_id}")
-    except InvalidToken:
-        logger.error(f"Invalid token when sending reminder {reminder_id} to user {user_id} for topic '{topic_name}'")
-    except Exception as e:
-        logger.error(f"Error sending reminder {reminder_id} to user {user_id} for topic '{topic_name}': {str(e)}")
-
-
-async def check_missed_reminders(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        users = db.get_all_users()
-        current_time = datetime.now(pytz.UTC)
-        for user in users:
-            tz = pytz.timezone(user.timezone)
-            reminders = db.get_reminders(user.user_id, user.timezone)
-            for reminder in reminders:
-                topic = db.get_topic(reminder.topic_id, user.user_id, user.timezone)
-                if topic and not topic.is_completed and reminder.scheduled_time <= current_time:
-                    logger.debug(
-                        f"Missed reminder {reminder.reminder_id} for topic '{topic.topic_name}' for user {user.user_id}, sending now")
-                    await send_reminder(context, user.user_id, topic.topic_name, reminder.reminder_id)
-    except Exception as e:
-        logger.error(f"Error checking missed reminders: {str(e)}")
-
-
-async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     user = db.get_user(user_id)
     if not user:
-        await update.message.reply_text(
-            "Пожалуйста, сначала выбери часовой пояс с помощью /start или /tz.",
-            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
-        )
+        logger.warning(f"User {user_id} not found for reminder {reminder_id}")
         return
-
-    categories = db.get_categories(user_id)
-    keyboard = [
-        [InlineKeyboardButton(category.category_name, callback_data=f"category_progress:{category.category_id}")]
-        for category in categories
-    ]
-    keyboard.append([InlineKeyboardButton("Без категории", callback_data="category_progress:none")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Выбери категорию для просмотра прогресса:", reply_markup=reply_markup
-    )
-    context.user_data["state"] = "awaiting_category_progress"
-    logger.debug(f"Progress categories sent to user {user_id}")
-
-
-async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: Optional[int], timezone: str):
-    user_id = update.effective_user.id
-    tz = pytz.timezone(timezone)
-    topics = db.get_active_topics(user_id, timezone, category_id)
-    category = db.get_category(category_id, user_id) if category_id else None
-    category_name = category.category_name if category else "Без категории"
-
-    if not topics:
-        text = f"В категории '{category_name}' нет активных тем! 😿"
-    else:
-        topics = sorted(topics, key=lambda topic: topic.created_at)
-        text = f"📚 **{category_name}** ({timezone}) 😺\n\n"
-        for topic in topics:
-            next_review = topic.next_review.astimezone(tz) if topic.next_review else None
-            progress = topic.completed_repetitions
-            progress_bar = "█" * progress + "░" * (6 - progress)
-            percentage = (progress / 6) * 100
-            text += (
-                f"📖 **{topic.topic_name}**\n"
-                f"⏰ **Следующее**: {next_review.strftime('%d.%m.%Y %H:%M') if next_review else 'нет'}\n"
-                f"✅ **Прогресс**: {progress_bar} {progress}/6 ({percentage:.1f}%)\n"
-                f"──────────\n"
-            )
-
-    keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_progress")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     try:
-        if update.callback_query:
-            await update.callback_query.answer()
-            await update.callback_query.message.edit_text(
-                text.strip(),
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-        else:
-            await update.effective_chat.send_message(
-                text.strip(),
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
+        topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+        if not topic:
+            logger.warning(f"Topic for reminder {reminder_id} not found for user {user_id}")
+            return
+        keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"⏰ Пора повторить тему '{topic_name}'! 😺",
+            reply_markup=reply_markup
+        )
+        logger.debug(f"Sent reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
     except Exception as e:
-        logger.error(f"Error sending category progress for user {user_id} in category {category_name}: {str(e)}")
-        if update.callback_query:
-            await update.callback_query.answer("Произошла ошибка, попробуйте позже.")
-        else:
-            await update.effective_chat.send_message("Произошла ошибка, попробуйте позже.")
+        logger.error(f"Error sending reminder {reminder_id} to user {user_id}: {str(e)}")
 
-    context.user_data["state"] = None
-    logger.debug(f"Category progress sent to user {user_id} for category {category_name}")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.effective_user:
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text="Ой, что-то пошло не так! 😿 Попробуй снова или используй /reset.",
+            reply_markup=MAIN_KEYBOARD
+        )
 
-
-async def schedule_existing_reminders(application):
-    try:
-        users = db.get_all_users()
-        current_time = datetime.now(pytz.UTC)
-        for user in users:
-            tz = pytz.timezone(user.timezone)
-            reminders = db.get_reminders(user.user_id, user.timezone)
-            for reminder in reminders:
-                topic = db.get_topic(reminder.topic_id, user.user_id, user.timezone)
-                if topic and not topic.is_completed:
-                    if reminder.scheduled_time <= current_time:
-                        logger.debug(
-                            f"Missed reminder {reminder.reminder_id} for topic '{topic.topic_name}' for user {user.user_id}, sending now")
-                        await send_reminder(application, user.user_id, topic.topic_name, reminder.reminder_id)
-                    else:
-                        scheduler.add_job(
-                            send_reminder,
-                            "date",
-                            run_date=reminder.scheduled_time.astimezone(tz),
-                            args=[application, user.user_id, topic.topic_name, reminder.reminder_id],
-                            id=f"reminder_{reminder.reminder_id}_{user.user_id}",
-                            timezone=tz
-                        )
-                        logger.debug(
-                            f"Scheduled reminder {reminder.reminder_id} for topic {topic.topic_name} at {reminder.scheduled_time.isoformat()}"
-                        )
-            scheduler.add_job(
-                check_missed_reminders,
-                "cron",
-                hour=10,
-                minute=0,
-                timezone=tz,
-                args=[application],
-                id=f"daily_check_missed_reminders_{user.user_id}"
-            )
-            logger.debug(f"Scheduled daily missed reminder check for user {user.user_id} at 10:00 {user.timezone}")
-    except Exception as e:
-        logger.error(f"Error scheduling existing reminders: {str(e)}")
-
+async def init_scheduler(context: ContextTypes.DEFAULT_TYPE):
+    users = db.get_all_users()
+    for user in users:
+        reminders = db.get_reminders(user.user_id, user.timezone)
+        tz = pytz.timezone(user.timezone)
+        for reminder in reminders:
+            topic = db.get_topic_by_reminder_id(reminder.reminder_id, user.user_id, user.timezone)
+            if topic and reminder.scheduled_time > datetime.now(tz):
+                scheduler.add_job(
+                    send_reminder,
+                    "date",
+                    run_date=reminder.scheduled_time.astimezone(tz),
+                    args=[context, user.user_id, topic.topic_name, reminder.reminder_id],
+                    id=f"reminder_{reminder.reminder_id}_{user.user_id}",
+                    timezone=tz
+                )
+                logger.debug(
+                    f"Scheduled reminder {reminder.reminder_id} for topic '{topic.topic_name}' "
+                    f"for user {user.user_id} at {reminder.scheduled_time.isoformat()}"
+                )
 
 async def main():
-    runner = None
     try:
-        application = Application.builder().token(BOT_TOKEN).build()
-
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("tz", handle_timezone))
-        application.add_handler(CommandHandler("reset", reset))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(handle_callback_query))
-
-        app = web.Application()
-        app.router.add_route('GET', '/health', health_check)
-        app.router.add_route('HEAD', '/health', health_check)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        logger.debug("Health check server started on port 8080")
-
-        scheduler.start()
-        logger.debug("Scheduler started")
-
-        await schedule_existing_reminders(application)
-
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            logger.debug("Received cancellation, stopping bot")
-            await application.updater.stop()
-            await application.stop()
-            await application.shutdown()
-            await runner.cleanup()
-            scheduler.shutdown(wait=False)
-            logger.debug("Scheduler, application, and health check server shut down successfully")
-
-    except InvalidToken as e:
-        logger.error(f"Invalid token error: {str(e)}")
-        if runner:
-            await runner.cleanup()
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
-        raise
-    except Exception as e:
-        logger.error(f"Error in main: {str(e)}")
-        if runner:
-            await runner.cleanup()
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
+        app = Application.builder().token(BOT_TOKEN).build()
+    except InvalidToken:
+        logger.error("Invalid bot token provided")
         raise
 
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("tz", handle_timezone))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
+
+    scheduler.start()
+    logger.debug("Scheduler started")
+
+    await init_scheduler(app)
+    logger.debug("Initialized scheduler with existing reminders")
+
+    app_runner = web.AppRunner(web.Application())
+    await app_runner.setup()
+    site = web.TCPSite(app_runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    await site.start()
+    logger.debug(f"Web server started on port {os.getenv('PORT', 8080)}")
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    logger.debug("Bot polling started")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except KeyboardInterrupt:
+        logger.info("Shutting down bot...")
+        await app.updater.stop()
+        await app.stop()
+        await app_runner.cleanup()
+        scheduler.shutdown()
+        logger.debug("Bot and web server stopped")
 
 if __name__ == "__main__":
     asyncio.run(main())

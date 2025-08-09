@@ -49,13 +49,15 @@ class Reminder(Base):
     topic_id = Column(Integer, ForeignKey('topics.topic_id'))
     scheduled_time = Column(DateTime)
 
-class DeletedTopic(Base):
-    __tablename__ = 'deleted_topics'
-    deleted_topic_id = Column(Integer, primary_key=True)
+class CompletedTopic(Base):
+    __tablename__ = 'completed_topics'
+    completed_topic_id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.user_id'))
     topic_name = Column(String)
-    deleted_at = Column(DateTime)
+    category_id = Column(Integer, ForeignKey('categories.category_id'), nullable=True)
+    completed_at = Column(DateTime)
     user = relationship("User")
+    category = relationship("Category")
 
 class Category(Base):
     __tablename__ = 'categories'
@@ -173,7 +175,7 @@ class Database:
     def get_active_topics(self, user_id, timezone, category_id=None):
         session = self.Session()
         try:
-            query = session.query(Topic).filter_by(user_id=user_id, is_completed=False)
+            query = session.query(Topic).filter_by(user_id=user_id)
             if category_id == 'all':
                 pass
             elif category_id is not None:
@@ -181,10 +183,10 @@ class Database:
             else:
                 query = query.filter(Topic.category_id.is_(None))
             topics = query.order_by(Topic.created_at).all()
-            logger.debug(f"Found {len(topics)} active topics for user {user_id} in category {category_id}")
+            logger.debug(f"Found {len(topics)} topics for user {user_id} in category {category_id}")
             return topics
         except Exception as e:
-            logger.error(f"Error fetching active topics for user {user_id}: {str(e)}")
+            logger.error(f"Error fetching topics for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -252,20 +254,15 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
-    def delete_topic(self, topic_id, user_id, topic_name):
+    def delete_topic(self, topic_id, user_id):
         session = self.Session()
         try:
             topic = session.query(Topic).filter_by(topic_id=topic_id, user_id=user_id).first()
             if topic:
-                deleted_topic = DeletedTopic(
-                    user_id=user_id,
-                    topic_name=topic_name,
-                    deleted_at=datetime.now(pytz.UTC)
-                )
-                session.add(deleted_topic)
+                session.query(Reminder).filter_by(topic_id=topic_id).delete()
                 session.delete(topic)
                 session.commit()
-                logger.debug(f"Deleted topic {topic_id} for user {user_id}")
+                logger.debug(f"Permanently deleted topic {topic_id} for user {user_id}")
                 return True
             return False
         except Exception as e:
@@ -281,14 +278,14 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
-    def get_deleted_topics(self, user_id):
+    def get_completed_topics(self, user_id):
         session = self.Session()
         try:
-            deleted_topics = session.query(DeletedTopic).filter_by(user_id=user_id).all()
-            logger.debug(f"Found {len(deleted_topics)} deleted topics for user {user_id}")
-            return deleted_topics
+            completed_topics = session.query(CompletedTopic).filter_by(user_id=user_id).all()
+            logger.debug(f"Found {len(completed_topics)} completed topics for user {user_id}")
+            return completed_topics
         except Exception as e:
-            logger.error(f"Error fetching deleted topics for user {user_id}: {str(e)}")
+            logger.error(f"Error fetching completed topics for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -299,16 +296,17 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
-    def restore_topic(self, deleted_topic_id, user_id, timezone):
+    def restore_topic(self, completed_topic_id, user_id, timezone):
         session = self.Session()
         try:
-            deleted_topic = session.query(DeletedTopic).filter_by(deleted_topic_id=deleted_topic_id, user_id=user_id).first()
-            if deleted_topic:
+            completed_topic = session.query(CompletedTopic).filter_by(completed_topic_id=completed_topic_id, user_id=user_id).first()
+            if completed_topic:
                 tz = pytz.timezone(timezone)
                 now = datetime.now(tz)
                 topic = Topic(
                     user_id=user_id,
-                    topic_name=deleted_topic.topic_name,
+                    topic_name=completed_topic.topic_name,
+                    category_id=completed_topic.category_id,
                     created_at=now,
                     last_reviewed=None,
                     next_review=now + timedelta(hours=1),
@@ -324,14 +322,14 @@ class Database:
                     scheduled_time=now + timedelta(hours=1)
                 )
                 session.add(reminder)
-                session.delete(deleted_topic)
+                session.delete(completed_topic)
                 session.commit()
-                logger.debug(f"Restored topic '{deleted_topic.topic_name}' for user {user_id}")
+                logger.debug(f"Restored completed topic '{completed_topic.topic_name}' for user {user_id}")
                 return topic.topic_id, topic.topic_name
             return None
         except Exception as e:
             session.rollback()
-            logger.error(f"Error restoring topic {deleted_topic_id} for user {user_id}: {str(e)}")
+            logger.error(f"Error restoring completed topic {completed_topic_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -495,6 +493,13 @@ class Database:
             else:
                 topic.is_completed = True
                 topic.next_review = None
+                completed_topic = CompletedTopic(
+                    user_id=user_id,
+                    topic_name=topic.topic_name,
+                    category_id=topic.category_id,
+                    completed_at=now
+                )
+                session.add(completed_topic)
                 reminder_id = None
 
             # Delete old reminders for this topic
