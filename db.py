@@ -1,11 +1,14 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.pool import QueuePool
 from datetime import datetime, timedelta
 import pytz
 import logging
 from dotenv import load_dotenv
 import os
+import tenacity
+from sqlalchemy.exc import OperationalError
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -51,7 +54,7 @@ class DeletedTopic(Base):
     deleted_topic_id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.user_id'))
     topic_name = Column(String)
-    deletion_time = Column(DateTime)
+    deleted_at = Column(DateTime)
     user = relationship("User")
 
 class Category(Base):
@@ -64,10 +67,24 @@ class Category(Base):
 
 class Database:
     def __init__(self):
-        self.engine = create_engine(os.getenv('DATABASE_URL'), echo=True)  # echo=True для отладки
+        self.engine = create_engine(
+            os.getenv('DATABASE_URL'),
+            echo=True,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_pre_ping=True
+        )
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def save_user(self, user_id, username, timezone):
         session = self.Session()
         try:
@@ -87,6 +104,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_user(self, user_id):
         session = self.Session()
         try:
@@ -99,6 +122,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def add_topic(self, user_id, topic_name, timezone, category_id=None):
         session = self.Session()
         try:
@@ -123,9 +152,11 @@ class Database:
                 scheduled_time=now + timedelta(hours=1)
             )
             session.add(reminder)
+            session.flush()
             session.commit()
-            logger.debug(f"Added topic '{topic_name}' for user {user_id} with category_id {category_id}")
-            return topic.topic_id
+            logger.debug(
+                f"Added topic '{topic_name}' for user {user_id} with category_id {category_id}, reminder_id {reminder.reminder_id}")
+            return topic.topic_id, reminder.reminder_id
         except Exception as e:
             session.rollback()
             logger.error(f"Error adding topic '{topic_name}' for user {user_id}: {str(e)}")
@@ -133,19 +164,23 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_active_topics(self, user_id, timezone, category_id=None):
         session = self.Session()
         try:
             query = session.query(Topic).filter_by(user_id=user_id, is_completed=False)
             if category_id == 'all':
-                # Не добавляем фильтр по category_id, чтобы вернуть все темы
                 pass
             elif category_id is not None:
                 query = query.filter(Topic.category_id == category_id)
             else:
-                query = query.filter(Topic.category_id.is_(None))  # Темы без категории
+                query = query.filter(Topic.category_id.is_(None))
             topics = query.order_by(Topic.created_at).all()
-            logger.debug(f"Executing query: {str(query)}")
             logger.debug(f"Found {len(topics)} active topics for user {user_id} in category {category_id}")
             return topics
         except Exception as e:
@@ -154,6 +189,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_topic(self, topic_id, user_id, timezone):
         session = self.Session()
         try:
@@ -166,6 +207,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_topic_by_name(self, user_id, topic_name, timezone):
         session = self.Session()
         try:
@@ -178,6 +225,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_topic_by_reminder_id(self, reminder_id, user_id, timezone):
         session = self.Session()
         try:
@@ -193,6 +246,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def delete_topic(self, topic_id, user_id, topic_name):
         session = self.Session()
         try:
@@ -201,7 +260,7 @@ class Database:
                 deleted_topic = DeletedTopic(
                     user_id=user_id,
                     topic_name=topic_name,
-                    deletion_time=datetime.now(pytz.UTC)
+                    deleted_at=datetime.now(pytz.UTC)
                 )
                 session.add(deleted_topic)
                 session.delete(topic)
@@ -216,6 +275,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_deleted_topics(self, user_id):
         session = self.Session()
         try:
@@ -228,6 +293,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def restore_topic(self, deleted_topic_id, user_id, timezone):
         session = self.Session()
         try:
@@ -265,6 +336,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def add_category(self, user_id, category_name):
         session = self.Session()
         try:
@@ -280,6 +357,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_categories(self, user_id):
         session = self.Session()
         try:
@@ -292,6 +375,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_category(self, category_id, user_id):
         session = self.Session()
         try:
@@ -304,6 +393,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def rename_category(self, category_id, user_id, new_name):
         session = self.Session()
         try:
@@ -321,12 +416,17 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def delete_category(self, category_id, user_id):
         session = self.Session()
         try:
             category = session.query(Category).filter_by(category_id=category_id, user_id=user_id).first()
             if category:
-                session.query(Topic).filter_by(category_id=category_id, user_id=user_id).update({"category_id": None})
                 session.delete(category)
                 session.commit()
                 logger.debug(f"Deleted category {category_id} for user {user_id}")
@@ -339,12 +439,18 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def move_topic_to_category(self, topic_id, user_id, category_id):
         session = self.Session()
         try:
             topic = session.query(Topic).filter_by(topic_id=topic_id, user_id=user_id).first()
             if topic:
-                topic.category_id = category_id
+                topic.category_id = category_id if category_id != 'none' else None
                 session.commit()
                 logger.debug(f"Moved topic {topic_id} to category {category_id} for user {user_id}")
                 return True
@@ -356,48 +462,64 @@ class Database:
         finally:
             session.close()
 
-    def complete_reminder(self, reminder_id, user_id, timezone):
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def mark_topic_repeated(self, user_id, topic_name, timezone):
         session = self.Session()
         try:
-            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
-            if not reminder:
-                return None
-            topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, user_id=user_id).first()
+            topic = session.query(Topic).filter_by(user_id=user_id, topic_name=topic_name, is_completed=False).first()
             if not topic:
                 return None
             tz = pytz.timezone(timezone)
             now = datetime.now(tz)
             topic.last_reviewed = now
             topic.completed_repetitions += 1
-            if topic.completed_repetitions >= 6:
-                topic.is_completed = True
-                topic.next_review = None
-                session.delete(reminder)
-                session.commit()
-                logger.debug(f"Completed topic '{topic.topic_name}' for user {user_id}")
-                return topic, None
-            else:
-                topic.repetition_stage += 1
-                interval = [1, 2, 4, 7, 14, 30][topic.repetition_stage - 1]
-                topic.next_review = now + timedelta(days=interval)
-                session.delete(reminder)
-                new_reminder = Reminder(
+            topic.repetition_stage += 1
+
+            # Define intervals for spaced repetition
+            intervals = [1, 1, 3, 7, 14, 30]  # Days for each stage (1-based indexing)
+            if topic.repetition_stage <= len(intervals):
+                topic.next_review = now + timedelta(days=intervals[topic.repetition_stage - 1])
+                reminder = Reminder(
                     user_id=user_id,
                     topic_id=topic.topic_id,
                     scheduled_time=topic.next_review
                 )
-                session.add(new_reminder)
+                session.add(reminder)
                 session.flush()
-                session.commit()
-                logger.debug(f"Completed reminder {reminder_id} for topic '{topic.topic_name}', new reminder scheduled")
-                return topic, new_reminder.reminder_id
+                reminder_id = reminder.reminder_id
+            else:
+                topic.is_completed = True
+                topic.next_review = None
+                reminder_id = None
+
+            # Delete old reminders for this topic
+            session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
+
+            session.commit()
+            logger.debug(
+                f"Marked topic '{topic_name}' as repeated for user {user_id}. "
+                f"Stage: {topic.repetition_stage}, Completed: {topic.completed_repetitions}, "
+                f"Next review: {topic.next_review}, Reminder ID: {reminder_id}"
+            )
+            return topic.topic_id, topic.completed_repetitions, topic.next_review, reminder_id
         except Exception as e:
             session.rollback()
-            logger.error(f"Error completing reminder {reminder_id} for user {user_id}: {str(e)}")
+            logger.error(f"Error marking topic '{topic_name}' as repeated for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_reminders(self, user_id, timezone):
         session = self.Session()
         try:
@@ -410,6 +532,12 @@ class Database:
         finally:
             session.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def get_all_users(self):
         session = self.Session()
         try:
@@ -418,18 +546,6 @@ class Database:
             return users
         except Exception as e:
             logger.error(f"Error fetching all users: {str(e)}")
-            raise
-        finally:
-            session.close()
-
-    def get_reminder(self, reminder_id, user_id, timezone):
-        session = self.Session()
-        try:
-            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
-            logger.debug(f"Queried reminder {reminder_id} for user {user_id}: {'found' if reminder else 'not found'}")
-            return reminder
-        except Exception as e:
-            logger.error(f"Error fetching reminder {reminder_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
