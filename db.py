@@ -81,6 +81,18 @@ class Database:
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
+    def _to_utc_naive(self, dt, tz_str):
+        tz = pytz.timezone(tz_str)
+        return dt.astimezone(pytz.utc).replace(tzinfo=None)
+
+    def _from_utc_naive(self, dt_utc, tz_str):
+        if dt_utc is None:
+            return None
+        if dt_utc.tzinfo is not None:
+            dt_utc = dt_utc.replace(tzinfo=None)
+        tz = pytz.timezone(tz_str)
+        return pytz.utc.localize(dt_utc).astimezone(tz)
+
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(3),
         wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
@@ -116,11 +128,7 @@ class Database:
         session = self.Session()
         try:
             user = session.query(User).filter_by(user_id=user_id).first()
-            logger.debug(f"Queried user {user_id}: {'found' if user else 'not found'}")
             return user
-        except Exception as e:
-            logger.error(f"Error fetching user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -134,14 +142,17 @@ class Database:
         session = self.Session()
         try:
             tz = pytz.timezone(timezone)
-            now = datetime.now(tz)
+            now_local = datetime.now(tz)
+            now_utc = self._to_utc_naive(now_local, timezone)
+            next_review_local = now_local + timedelta(hours=1)
+            next_review_utc = self._to_utc_naive(next_review_local, timezone)
             topic = Topic(
                 user_id=user_id,
                 category_id=category_id,
                 topic_name=topic_name,
-                created_at=now,
+                created_at=now_utc,
                 last_reviewed=None,
-                next_review=now + timedelta(hours=1),
+                next_review=next_review_utc,
                 repetition_stage=1,
                 completed_repetitions=0,
                 is_completed=False
@@ -151,17 +162,14 @@ class Database:
             reminder = Reminder(
                 user_id=user_id,
                 topic_id=topic.topic_id,
-                scheduled_time=now + timedelta(hours=1)
+                scheduled_time=next_review_utc
             )
             session.add(reminder)
             session.flush()
             session.commit()
-            logger.debug(
-                f"Added topic '{topic_name}' for user {user_id} with category_id {category_id}, reminder_id {reminder.reminder_id}")
             return topic.topic_id, reminder.reminder_id
         except Exception as e:
             session.rollback()
-            logger.error(f"Error adding topic '{topic_name}' for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -175,7 +183,7 @@ class Database:
     def get_active_topics(self, user_id, timezone, category_id=None):
         session = self.Session()
         try:
-            query = session.query(Topic).filter_by(user_id=user_id)
+            query = session.query(Topic).filter_by(user_id=user_id, is_completed=False)
             if category_id == 'all':
                 pass
             elif category_id is not None:
@@ -183,11 +191,9 @@ class Database:
             else:
                 query = query.filter(Topic.category_id.is_(None))
             topics = query.order_by(Topic.created_at).all()
-            logger.debug(f"Found {len(topics)} topics for user {user_id} in category {category_id}")
+            for topic in topics:
+                topic.next_review = topic.next_review  # remains utc naive
             return topics
-        except Exception as e:
-            logger.error(f"Error fetching topics for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -201,11 +207,9 @@ class Database:
         session = self.Session()
         try:
             topic = session.query(Topic).filter_by(topic_id=topic_id, user_id=user_id).first()
-            logger.debug(f"Queried topic {topic_id} for user {user_id}: {'found' if topic else 'not found'}")
+            if topic:
+                topic.next_review = topic.next_review  # utc naive
             return topic
-        except Exception as e:
-            logger.error(f"Error fetching topic {topic_id} for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -219,11 +223,9 @@ class Database:
         session = self.Session()
         try:
             topic = session.query(Topic).filter_by(user_id=user_id, topic_name=topic_name).first()
-            logger.debug(f"Queried topic '{topic_name}' for user {user_id}: {'found' if topic else 'not found'}")
+            if topic:
+                topic.next_review = topic.next_review
             return topic
-        except Exception as e:
-            logger.error(f"Error fetching topic '{topic_name}' for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -239,12 +241,10 @@ class Database:
             reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
             if reminder:
                 topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, user_id=user_id).first()
-                logger.debug(f"Queried topic by reminder {reminder_id} for user {user_id}: {'found' if topic else 'not found'}")
+                if topic:
+                    topic.next_review = topic.next_review
                 return topic
             return None
-        except Exception as e:
-            logger.error(f"Error fetching topic by reminder {reminder_id} for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -262,12 +262,10 @@ class Database:
                 session.query(Reminder).filter_by(topic_id=topic_id).delete()
                 session.delete(topic)
                 session.commit()
-                logger.debug(f"Permanently deleted topic {topic_id} for user {user_id}")
                 return True
             return False
         except Exception as e:
             session.rollback()
-            logger.error(f"Error deleting topic {topic_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -282,11 +280,7 @@ class Database:
         session = self.Session()
         try:
             completed_topics = session.query(CompletedTopic).filter_by(user_id=user_id).all()
-            logger.debug(f"Found {len(completed_topics)} completed topics for user {user_id}")
             return completed_topics
-        except Exception as e:
-            logger.error(f"Error fetching completed topics for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -302,14 +296,17 @@ class Database:
             completed_topic = session.query(CompletedTopic).filter_by(completed_topic_id=completed_topic_id, user_id=user_id).first()
             if completed_topic:
                 tz = pytz.timezone(timezone)
-                now = datetime.now(tz)
+                now_local = datetime.now(tz)
+                now_utc = self._to_utc_naive(now_local, timezone)
+                next_review_local = now_local + timedelta(hours=1)
+                next_review_utc = self._to_utc_naive(next_review_local, timezone)
                 topic = Topic(
                     user_id=user_id,
                     topic_name=completed_topic.topic_name,
                     category_id=completed_topic.category_id,
-                    created_at=now,
+                    created_at=now_utc,
                     last_reviewed=None,
-                    next_review=now + timedelta(hours=1),
+                    next_review=next_review_utc,
                     repetition_stage=1,
                     completed_repetitions=0,
                     is_completed=False
@@ -319,17 +316,15 @@ class Database:
                 reminder = Reminder(
                     user_id=user_id,
                     topic_id=topic.topic_id,
-                    scheduled_time=now + timedelta(hours=1)
+                    scheduled_time=next_review_utc
                 )
                 session.add(reminder)
                 session.delete(completed_topic)
                 session.commit()
-                logger.debug(f"Restored completed topic '{completed_topic.topic_name}' for user {user_id}")
                 return topic.topic_id, topic.topic_name
             return None
         except Exception as e:
             session.rollback()
-            logger.error(f"Error restoring completed topic {completed_topic_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -346,11 +341,9 @@ class Database:
             category = Category(user_id=user_id, category_name=category_name)
             session.add(category)
             session.commit()
-            logger.debug(f"Added category '{category_name}' for user {user_id}")
             return category.category_id
         except Exception as e:
             session.rollback()
-            logger.error(f"Error adding category '{category_name}' for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -365,11 +358,7 @@ class Database:
         session = self.Session()
         try:
             categories = session.query(Category).filter_by(user_id=user_id).all()
-            logger.debug(f"Found {len(categories)} categories for user {user_id}")
             return categories
-        except Exception as e:
-            logger.error(f"Error fetching categories for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -383,11 +372,7 @@ class Database:
         session = self.Session()
         try:
             category = session.query(Category).filter_by(category_id=category_id, user_id=user_id).first()
-            logger.debug(f"Queried category {category_id} for user {user_id}: {'found' if category else 'not found'}")
             return category
-        except Exception as e:
-            logger.error(f"Error fetching category {category_id} for user {user_id}: {str(e)}")
-            raise
         finally:
             session.close()
 
@@ -404,12 +389,10 @@ class Database:
             if category:
                 category.category_name = new_name
                 session.commit()
-                logger.debug(f"Renamed category {category_id} to '{new_name}' for user {user_id}")
                 return True
             return False
         except Exception as e:
             session.rollback()
-            logger.error(f"Error renaming category {category_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -425,14 +408,14 @@ class Database:
         try:
             category = session.query(Category).filter_by(category_id=category_id, user_id=user_id).first()
             if category:
+                # Move topics to none
+                session.query(Topic).filter_by(category_id=category_id).update({Topic.category_id: None})
                 session.delete(category)
                 session.commit()
-                logger.debug(f"Deleted category {category_id} for user {user_id}")
                 return True
             return False
         except Exception as e:
             session.rollback()
-            logger.error(f"Error deleting category {category_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -450,12 +433,10 @@ class Database:
             if topic:
                 topic.category_id = category_id if category_id != 'none' else None
                 session.commit()
-                logger.debug(f"Moved topic {topic_id} to category {category_id} for user {user_id}")
                 return True
             return False
         except Exception as e:
             session.rollback()
-            logger.error(f"Error moving topic {topic_id} to category {category_id} for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -473,15 +454,16 @@ class Database:
             if not topic:
                 return None
             tz = pytz.timezone(timezone)
-            now = datetime.now(tz)
-            topic.last_reviewed = now
+            now_local = datetime.now(tz)
+            now_utc = self._to_utc_naive(now_local, timezone)
+            topic.last_reviewed = now_utc
             topic.completed_repetitions += 1
             topic.repetition_stage += 1
 
-            # Define intervals for spaced repetition
-            intervals = [1, 1, 3, 7, 14, 30]  # Days for each stage (1-based indexing)
+            intervals = [1, 1, 3, 7, 14, 30]  # days
             if topic.repetition_stage <= len(intervals):
-                topic.next_review = now + timedelta(days=intervals[topic.repetition_stage - 1])
+                next_review_local = now_local + timedelta(days=intervals[topic.repetition_stage - 1])
+                topic.next_review = self._to_utc_naive(next_review_local, timezone)
                 reminder = Reminder(
                     user_id=user_id,
                     topic_id=topic.topic_id,
@@ -497,24 +479,16 @@ class Database:
                     user_id=user_id,
                     topic_name=topic.topic_name,
                     category_id=topic.category_id,
-                    completed_at=now
+                    completed_at=now_utc
                 )
                 session.add(completed_topic)
                 reminder_id = None
 
-            # Delete old reminders for this topic
             session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
-
             session.commit()
-            logger.debug(
-                f"Marked topic '{topic_name}' as repeated for user {user_id}. "
-                f"Stage: {topic.repetition_stage}, Completed: {topic.completed_repetitions}, "
-                f"Next review: {topic.next_review}, Reminder ID: {reminder_id}"
-            )
             return topic.topic_id, topic.completed_repetitions, topic.next_review, reminder_id
         except Exception as e:
             session.rollback()
-            logger.error(f"Error marking topic '{topic_name}' as repeated for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
@@ -525,15 +499,134 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
-    def get_reminders(self, user_id, timezone):
+    def mark_topic_repeated_by_reminder(self, reminder_id, user_id, timezone):
+        session = self.Session()
+        try:
+            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id).first()
+            if not reminder:
+                return None
+            topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, is_completed=False).first()
+            if not topic:
+                return None
+            tz = pytz.timezone(timezone)
+            now_local = datetime.now(tz)
+            now_utc = self._to_utc_naive(now_local, timezone)
+            topic.last_reviewed = now_utc
+            topic.completed_repetitions += 1
+            topic.repetition_stage += 1
+
+            intervals = [1, 1, 3, 7, 14, 30]  # days
+            if topic.repetition_stage <= len(intervals):
+                next_review_local = now_local + timedelta(days=intervals[topic.repetition_stage - 1])
+                topic.next_review = self._to_utc_naive(next_review_local, timezone)
+                new_reminder = Reminder(
+                    user_id=user_id,
+                    topic_id=topic.topic_id,
+                    scheduled_time=topic.next_review
+                )
+                session.add(new_reminder)
+                session.flush()
+                new_reminder_id = new_reminder.reminder_id
+            else:
+                topic.is_completed = True
+                topic.next_review = None
+                completed_topic = CompletedTopic(
+                    user_id=user_id,
+                    topic_name=topic.topic_name,
+                    category_id=topic.category_id,
+                    completed_at=now_utc
+                )
+                session.add(completed_topic)
+                new_reminder_id = None
+
+            session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
+            session.commit()
+            return topic.completed_repetitions, topic.next_review, new_reminder_id
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def add_reminder(self, user_id, topic_id, scheduled_time_utc):
+        session = self.Session()
+        try:
+            reminder = Reminder(
+                user_id=user_id,
+                topic_id=topic_id,
+                scheduled_time=scheduled_time_utc
+            )
+            session.add(reminder)
+            session.commit()
+            return reminder.reminder_id
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def delete_reminder(self, reminder_id):
+        session = self.Session()
+        try:
+            session.query(Reminder).filter_by(reminder_id=reminder_id).delete()
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_reminders(self, user_id):
         session = self.Session()
         try:
             reminders = session.query(Reminder).filter_by(user_id=user_id).all()
-            logger.debug(f"Found {len(reminders)} reminders for user {user_id}")
             return reminders
-        except Exception as e:
-            logger.error(f"Error fetching reminders for user {user_id}: {str(e)}")
-            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_reminder(self, reminder_id):
+        session = self.Session()
+        try:
+            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id).first()
+            return reminder
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_reminder_by_topic(self, topic_id):
+        session = self.Session()
+        try:
+            reminder = session.query(Reminder).filter_by(topic_id=topic_id).first()
+            return reminder
         finally:
             session.close()
 
@@ -547,10 +640,6 @@ class Database:
         session = self.Session()
         try:
             users = session.query(User).all()
-            logger.debug(f"Found {len(users)} users")
             return users
-        except Exception as e:
-            logger.error(f"Error fetching all users: {str(e)}")
-            raise
         finally:
             session.close()
