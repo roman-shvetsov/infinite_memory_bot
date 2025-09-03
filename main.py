@@ -21,6 +21,7 @@ from aiohttp import web
 from aiohttp.web import get, head
 from dotenv import load_dotenv
 import tenacity
+import aiohttp
 
 # Настройка логирования
 logging.basicConfig(
@@ -451,14 +452,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         action = data.split(":", 1)[1]
         if action == "create":
             context.user_data["state"] = "awaiting_category_name"
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Напиши название новой категории! 😊",
                 reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
             )
         elif action == "rename":
             categories = db.get_categories(user_id)
             if not categories:
-                await query.message.edit_text(
+                await query.message.reply_text(
                     "У тебя нет категорий для переименования! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -470,14 +471,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 for category in categories
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Выбери категорию для переименования:", reply_markup=reply_markup
             )
             context.user_data["state"] = "awaiting_category_rename"
         elif action == "delete":
             categories = db.get_categories(user_id)
             if not categories:
-                await query.message.edit_text(
+                await query.message.reply_text(
                     "У тебя нет категорий для удаления! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -489,14 +490,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 for category in categories
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Выбери категорию для удаления (темы перейдут в 'Без категории'):", reply_markup=reply_markup
             )
             context.user_data["state"] = "awaiting_category_deletion"
         elif action == "move":
             topics = db.get_active_topics(user_id, user.timezone, category_id='all')
             if not topics:
-                await query.message.edit_text(
+                await query.message.reply_text(
                     "У тебя нет тем для перемещения! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -508,7 +509,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 for topic in topics
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Выбери тему для перемещения:", reply_markup=reply_markup
             )
             context.user_data["state"] = "awaiting_topic_selection_move"
@@ -519,7 +520,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         category_id = int(data.split(":", 1)[1])
         context.user_data["rename_category_id"] = category_id
         context.user_data["state"] = "awaiting_new_category_name"
-        await query.message.edit_text(
+        await query.message.reply_text(
             "Напиши новое название категории! 😊",
             reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
         )
@@ -529,14 +530,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("delete_category:"):
         category_id = int(data.split(":", 1)[1])
         if db.delete_category(category_id, user_id):
-            await query.message.delete()
             await query.message.reply_text(
                 "Категория удалена! Темы перемещены в 'Без категории'. 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             logger.debug(f"User {user_id} deleted category {category_id}")
         else:
-            await query.message.delete()
             await query.message.reply_text(
                 "Категория не найдена. 😿",
                 reply_markup=MAIN_KEYBOARD
@@ -555,7 +554,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         keyboard.append([InlineKeyboardButton("Без категории", callback_data="move_to_category:none")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(
+        await query.message.reply_text(
             "Выбери новую категорию для темы:", reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_category_selection"
@@ -568,14 +567,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         topic_id = context.user_data.get("move_topic_id")
         if db.move_topic_to_category(topic_id, user_id, category_id):
             category_name = db.get_category(category_id, user_id).category_name if category_id else "Без категории"
-            await query.message.delete()
             await query.message.reply_text(
                 f"Тема перемещена в категорию '{category_name}'! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             logger.debug(f"User {user_id} moved topic {topic_id} to category {category_id}")
         else:
-            await query.message.delete()
             await query.message.reply_text(
                 "Тема или категория не найдена. 😿",
                 reply_markup=MAIN_KEYBOARD
@@ -588,7 +585,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("add_to_new_category:"):
         parts = data.split(":")
         if parts[-1] == "no":
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Категория создана без добавления тем! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
@@ -600,7 +597,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             category_id = int(parts[1])
             topics = db.get_active_topics(user_id, user.timezone, category_id='all')
             if not topics:
-                await query.message.edit_text(
+                await query.message.reply_text(
                     "У тебя нет тем для добавления! 😿",
                     reply_markup=MAIN_KEYBOARD
                 )
@@ -612,7 +609,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 for topic in topics
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
+            await query.message.reply_text(
                 "Выбери тему для добавления в новую категорию:", reply_markup=reply_markup
             )
             context.user_data["move_to_category_id"] = category_id
@@ -625,14 +622,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         category_id = context.user_data.get("move_to_category_id")
         if db.move_topic_to_category(topic_id, user_id, category_id):
             category_name = db.get_category(category_id, user_id).category_name
-            await query.message.delete()
             await query.message.reply_text(
                 f"Тема добавлена в категорию '{category_name}'! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
             logger.debug(f"User {user_id} added topic {topic_id} to category {category_id}")
         else:
-            await query.message.delete()
             await query.message.reply_text(
                 "Ошибка добавления темы. 😿",
                 reply_markup=MAIN_KEYBOARD
@@ -1055,6 +1050,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD
         )
 
+async def keep_awake():
+    session = aiohttp.ClientSession()
+    domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")  # or hardcode 'infinite-memory-bot.onrender.com'
+    url = f"https://{domain}/health"
+    while True:
+        try:
+            async with session.get(url) as resp:
+                logger.debug(f"Keep-awake ping: {resp.status}")
+        except Exception as e:
+            logger.error(f"Keep-awake error: {e}")
+        await asyncio.sleep(600)  # 10 min
+
 async def main():
     global app
     try:
@@ -1084,6 +1091,8 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
     await site.start()
     logger.debug(f"Web server started on port {os.getenv('PORT', 8080)}")
+
+    asyncio.create_task(keep_awake())  # Start keep-awake task
 
     await app.initialize()
     await app.start()
