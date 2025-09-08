@@ -458,20 +458,26 @@ class Database:
             now_utc = self._to_utc_naive(now_local, timezone)
             topic.last_reviewed = now_utc
             topic.completed_repetitions += 1
-            topic.repetition_stage += 1
+            topic.repetition_stage = topic.completed_repetitions + 1
 
-            intervals = [1, 1, 3, 7, 14, 30]  # days
-            if topic.repetition_stage <= len(intervals):
-                next_review_local = now_local + timedelta(days=intervals[topic.repetition_stage - 1])
-                topic.next_review = self._to_utc_naive(next_review_local, timezone)
-                reminder = Reminder(
-                    user_id=user_id,
-                    topic_id=topic.topic_id,
-                    scheduled_time=topic.next_review
-                )
-                session.add(reminder)
-                session.flush()
-                reminder_id = reminder.reminder_id
+            intervals = [1, 1, 3, 7, 14, 30, 90]  # days
+            if topic.completed_repetitions < len(intervals):
+                next_review_local = now_local + timedelta(days=intervals[topic.completed_repetitions])
+
+                # Обновляем существующее напоминание вместо удаления
+                existing_reminder = session.query(Reminder).filter_by(topic_id=topic.topic_id).first()
+                if existing_reminder:
+                    existing_reminder.scheduled_time = topic.next_review
+                    reminder_id = existing_reminder.reminder_id
+                else:
+                    new_reminder = Reminder(
+                        user_id=user_id,
+                        topic_id=topic.topic_id,
+                        scheduled_time=topic.next_review
+                    )
+                    session.add(new_reminder)
+                    session.flush()
+                    reminder_id = new_reminder.reminder_id
             else:
                 topic.is_completed = True
                 topic.next_review = None
@@ -484,7 +490,6 @@ class Database:
                 session.add(completed_topic)
                 reminder_id = None
 
-            session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
             session.commit()
             return topic.topic_id, topic.completed_repetitions, topic.next_review, reminder_id
         except Exception as e:
@@ -513,20 +518,27 @@ class Database:
             now_utc = self._to_utc_naive(now_local, timezone)
             topic.last_reviewed = now_utc
             topic.completed_repetitions += 1
-            topic.repetition_stage += 1
+            topic.repetition_stage = topic.completed_repetitions + 1
 
-            intervals = [1, 1, 3, 7, 14, 30]  # days
-            if topic.repetition_stage <= len(intervals):
-                next_review_local = now_local + timedelta(days=intervals[topic.repetition_stage - 1])
+            intervals = [1, 1, 3, 7, 14, 30, 90]  # days
+            if topic.completed_repetitions < len(intervals):
+                next_review_local = now_local + timedelta(days=intervals[topic.completed_repetitions])
                 topic.next_review = self._to_utc_naive(next_review_local, timezone)
-                new_reminder = Reminder(
-                    user_id=user_id,
-                    topic_id=topic.topic_id,
-                    scheduled_time=topic.next_review
-                )
-                session.add(new_reminder)
-                session.flush()
-                new_reminder_id = new_reminder.reminder_id
+
+                # Обновляем существующее напоминание вместо удаления
+                existing_reminder = session.query(Reminder).filter_by(topic_id=topic.topic_id).first()
+                if existing_reminder:
+                    existing_reminder.scheduled_time = topic.next_review
+                    new_reminder_id = existing_reminder.reminder_id
+                else:
+                    new_reminder = Reminder(
+                        user_id=user_id,
+                        topic_id=topic.topic_id,
+                        scheduled_time=topic.next_review
+                    )
+                    session.add(new_reminder)
+                    session.flush()
+                    new_reminder_id = new_reminder.reminder_id
             else:
                 topic.is_completed = True
                 topic.next_review = None
@@ -539,7 +551,6 @@ class Database:
                 session.add(completed_topic)
                 new_reminder_id = None
 
-            session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
             session.commit()
             return topic.completed_repetitions, topic.next_review, new_reminder_id
         except Exception as e:

@@ -256,7 +256,7 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     logger.debug(f"User {user_id} requested progress for category {category_id}")
     topics = db.get_active_topics(user_id, timezone, category_id=category_id)
-    total_repetitions = 6
+    total_repetitions = 7
     category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
 
     if not topics:
@@ -649,7 +649,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Ошибка при отметке повторения. 😔")
             return
         completed_repetitions, next_reminder_time, new_reminder_id = result
-        total_repetitions = 6
+        total_repetitions = 7
         progress_percentage = (completed_repetitions / total_repetitions) * 100
         progress_bar = "█" * int(completed_repetitions) + "░" * (total_repetitions - completed_repetitions)
         tz = pytz.timezone(user.timezone)
@@ -816,7 +816,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             topic_id, completed_repetitions, next_reminder_time, reminder_id = result
             topic = db.get_topic(topic_id, user_id, user.timezone)
-            total_repetitions = 6
+            total_repetitions = 7
             progress_percentage = (completed_repetitions / total_repetitions) * 100
             progress_bar = "█" * int(completed_repetitions) + "░" * (total_repetitions - completed_repetitions)
             tz = pytz.timezone(user.timezone)
