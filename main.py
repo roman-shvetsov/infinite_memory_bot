@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import signal
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -1050,26 +1051,46 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD
         )
 
+
 async def keep_awake():
-    session = aiohttp.ClientSession()
-    domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")  # or hardcode 'infinite-memory-bot.onrender.com'
+    domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not domain:
+        logger.warning("RENDER_EXTERNAL_HOSTNAME not set, keep-awake disabled")
+        return
+
     url = f"https://{domain}/health"
-    while True:
-        try:
-            async with session.get(url) as resp:
-                logger.debug(f"Keep-awake ping: {resp.status}")
-        except Exception as e:
-            logger.error(f"Keep-awake error: {e}")
-        await asyncio.sleep(600)  # 10 min
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url, timeout=10) as resp:
+                    logger.debug(f"Keep-awake ping: {resp.status}")
+            except Exception as e:
+                logger.error(f"Keep-awake error: {e}")
+            await asyncio.sleep(300)  # 5 минут вместо 10
+
 
 async def main():
     global app
+
+    # Уменьшаем логирование для некоторых библиотек
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+    logger.info("Starting bot initialization...")
+
     try:
         app = Application.builder().token(BOT_TOKEN).build()
+        logger.info("Bot application created successfully")
     except InvalidToken:
         logger.error("Invalid bot token provided")
         raise
+    except Exception as e:
+        logger.error(f"Failed to create bot application: {e}")
+        raise
 
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tz", handle_timezone))
     app.add_handler(CommandHandler("help", help_command))
@@ -1078,37 +1099,128 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
-    scheduler.start()
-    logger.debug("Scheduler started")
-
-    await init_scheduler(app)
-    logger.debug("Initialized scheduler with existing reminders and daily checks")
-
-    web_app = web.Application()
-    web_app.add_routes([web.get('/health', health_check)])
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
-    await site.start()
-    logger.debug(f"Web server started on port {os.getenv('PORT', 8080)}")
-
-    asyncio.create_task(keep_awake())  # Start keep-awake task
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    logger.debug("Bot polling started")
-
+    # Запускаем планировщик
     try:
-        while True:
-            await asyncio.sleep(3600)
-    except KeyboardInterrupt:
-        logger.info("Shutting down bot...")
-        await app.updater.stop()
-        await app.stop()
-        await runner.cleanup()
-        scheduler.shutdown()
-        logger.debug("Bot and web server stopped")
+        scheduler.start()
+        logger.info("Scheduler started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+        raise
+
+    # Инициализируем планировщик с существующими напоминаниями
+    try:
+        await init_scheduler(app)
+        logger.info("Scheduler initialized with existing reminders")
+    except Exception as e:
+        logger.error(f"Failed to initialize scheduler: {e}")
+        # Не прерываем выполнение, продолжаем без напоминаний
+
+    # Настраиваем web server для health checks
+    try:
+        web_app = web.Application()
+        web_app.add_routes([web.get('/health', health_check)])
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+        await site.start()
+        logger.info(f"Web server started on port {os.getenv('PORT', 8080)}")
+    except Exception as e:
+        logger.error(f"Failed to start web server: {e}")
+        # Не прерываем выполнение, бот может работать без web сервера
+
+    # Запускаем keep-awake задачу (только если есть домен)
+    keep_awake_task = None
+    if os.getenv("RENDER_EXTERNAL_HOSTNAME"):
+        keep_awake_task = asyncio.create_task(keep_awake())
+        logger.info("Keep-awake task started")
+    else:
+        logger.warning("RENDER_EXTERNAL_HOSTNAME not set, keep-awake disabled")
+
+    # Graceful shutdown handlers
+    shutdown_event = asyncio.Event()
+
+    async def shutdown():
+        logger.info("Starting graceful shutdown...")
+
+        # Отменяем keep-awake задачу
+        if keep_awake_task and not keep_awake_task.done():
+            keep_awake_task.cancel()
+            try:
+                await keep_awake_task
+            except asyncio.CancelledError:
+                logger.info("Keep-awake task cancelled")
+
+        # Останавливаем бота
+        try:
+            await app.updater.stop()
+            await app.stop()
+            logger.info("Bot stopped successfully")
+        except Exception as e:
+            logger.error(f"Error stopping bot: {e}")
+
+        # Останавливаем планировщик
+        try:
+            scheduler.shutdown()
+            logger.info("Scheduler shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down scheduler: {e}")
+
+        # Останавливаем web server
+        try:
+            await runner.cleanup()
+            logger.info("Web server stopped successfully")
+        except Exception as e:
+            logger.error(f"Error stopping web server: {e}")
+
+        logger.info("Shutdown complete")
+        shutdown_event.set()
+
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, initiating shutdown...")
+        asyncio.create_task(shutdown())
+
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Инициализируем и запускаем бота
+    try:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        logger.info("Bot polling started successfully")
+
+        # Основной цикл - просто ждем события завершения
+        logger.info("Bot is now running and waiting for messages...")
+        await shutdown_event.wait()
+
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        await shutdown()
+        raise
+
+    finally:
+        # Гарантируем cleanup даже при ошибках
+        if not shutdown_event.is_set():
+            await shutdown()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Устанавливаем обработчик для asyncio исключений
+    def handle_exception(loop, context):
+        logger.error(f"AsyncIO exception: {context}")
+
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(handle_exception)
+
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Main loop error: {e}")
+    finally:
+        loop.close()
+        logger.info("Event loop closed")
