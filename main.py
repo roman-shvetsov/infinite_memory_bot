@@ -78,69 +78,120 @@ async def health_check(request):
         return web.Response(status=200)
     return web.json_response({"status": "ok"})
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Received /start command from user {update.effective_user.id}")
     user = db.get_user(update.effective_user.id)
     if user:
         await update.message.reply_text(
-            f"🎉 Привет, {update.effective_user.first_name}! 😺\n"
+            f"С возвращением, {update.effective_user.first_name}! 😺\n"
             f"Твой текущий часовой пояс: {user.timezone}\n"
-            "Хочешь изменить его? \nИспользуй команду /tz или напиши название часового пояса (например, 'Europe/Moscow') или смещение (например, 'UTC+8').\nЧтобы узнать подробнее о боте, используйте команду /help",
+            "Хочешь изменить? Используй /tz\n"
+            "Помощь: /help\n\n"
+            "Помни: регулярные повторения = знания навсегда! 🚀",
             reply_markup=MAIN_KEYBOARD
         )
     else:
         await update.message.reply_text(
-            "🎉 Добро пожаловать в бот для повторения тем! 📚\n\n"
-            "Я создан, чтобы помочь тебе эффективно запоминать информацию с помощью метода интервального повторения (кривой забывания). 😺 "
-            "Добавляй темы, которые хочешь изучить, и я напомню тебе о них в нужное время, чтобы знания закрепились надолго! 🚀\n\n"
-            "Для начала выбери свой часовой пояс. Это важно, чтобы напоминания приходили вовремя! ⏰\n"
-            "📍 Отправь название часового пояса (например, 'Europe/Moscow' для Москвы, UTC+3).\n"
-            "📍 Или укажи смещение от UTC (например, 'UTC+8' или '+8').\n"
-            "📍 Хочешь выбрать из списка? Используй команду /tz.\n\n"
-            "Давай начнем! 😊 Какой у тебя часовой пояс?",
-            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
+            "🚀 *Добро пожаловать в твоего персонального тренера памяти!*\n\n"
+
+            "💡 *Знаешь ли ты что?*\n"
+            "• 90% информации мы забываем за первые 24 часа\n"
+            "• Без повторений знания просто \"испаряются\"\n"
+            "• Можно учить часами и не запомнить ничего\n\n"
+
+            "🎯 *А теперь хорошие новости:*\n"
+            "Есть научный способ запоминать информацию *навсегда*!\n\n"
+
+            "🔬 *Метод интервального повторения:*\n"
+            "Я напоминаю повторить в идеальные моменты:\n"
+            "• Когда ты вот-вот забудешь\n"
+            "• Чтобы закрепить в долговременной памяти\n"
+            "• Без лишних усилий с твоей стороны\n\n"
+
+            "📊 *Всего 7 повторений = знание на годы:*\n"
+            "1 час → 1 день → 3 дня → 1 неделя → 2 недели → 1 месяц → 3 месяца\n\n"
+
+            "✨ *Что это тебе даёт:*\n"
+            "• Запоминаешь в 3 раза эффективнее\n"
+            "• Тратишь всего 5-15 минут в день\n"
+            "• Знания остаются с тобой навсегда\n"
+            "• Учишься без стресса и напряжения\n\n"
+
+            "🎯 *Начни прямо сейчас:*\n"
+            "1. Выбери часовой пояс (чтобы напоминания приходили вовремя)\n"
+            "2. Добавь первую тему\n"
+            "3. Отмечай повторения когда я напоминаю\n"
+            "4. Следи как растёт твоя эрудиция!\n\n"
+
+            "⏰ *Выбери свой часовой пояс:*\n"
+            "Напиши название (например, 'Europe/Moscow') или смещение (например, 'UTC+3')\n"
+            "Или используй /tz для выбора из списка",
+            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True),
+            parse_mode="Markdown"
         )
     logger.debug(f"Sent start response to user {update.effective_user.id}")
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет подробное описание бота и его функционала."""
     user_id = update.effective_user.id
     logger.debug(f"Received /help command from user {user_id}")
 
     help_text = (
-        "🎉 **Добро пожаловать в бот для повторения тем!** 📚\n\n"
-        "Я создан, чтобы помочь тебе эффективно запоминать информацию с помощью **метода интервального повторения** (кривой забывания). 😺 "
-        "Добавляй темы, которые хочешь изучить, а я напомню о них в нужное время, чтобы знания закрепились надолго! 🚀\n\n"
-        "📖 **Что я умею?**\n"
-        "✅ **Добавлять темы**: Создавай темы для изучения и распределяй их по категориям.\n"
-        "✅ **Напоминать о повторении**: Я отправлю напоминания в твоём часовом поясе, чтобы ты повторял темы по оптимальному графику (6 повторений для закрепления).\n"
-        "✅ **Показывать прогресс**: Отслеживай, сколько повторений завершено для каждой темы, включая завершённые, с удобной прогресс-баром!\n"
-        "✅ **Управлять категориями**: Создавай, переименовывай, удаляй категории или перемещай темы между ними.\n"
-        "✅ **Удалять темы**: Удалённые темы исчезают навсегда, так что будь осторожен!\n"
-        "✅ **Восстанавливать завершённые темы**: Завершил все 6 повторений? Поздравляю! Ты можешь восстановить тему через 'Восстановить тему', чтобы начать заново.\n"
-        "✅ **Настраивать часовой пояс**: Укажи свой часовой пояс, чтобы напоминания приходили вовремя.\n\n"
-        "🛠 **Как пользоваться?**\n"
-        "🔹 **/start** — Начать работу с ботом и установить часовой пояс.\n"
-        "🔹 **/tz** — Изменить часовой пояс (например, 'Europe/Moscow' или 'UTC+8').\n"
-        "🔹 **/help** — Показать это сообщение.\n"
-        "🔹 **/reset** — Сбросить текущее состояние (если что-то пошло не так).\n"
-        "🔹 **Кнопки главного меню**:\n"
-        "   - *Мой прогресс*: Посмотреть прогресс по темам и категориям, включая завершённые темы.\n"
-        "   - *Добавить тему*: Создать новую тему и выбрать для неё категорию.\n"
-        "   - *Удалить тему*: Удалить тему навсегда (восстановить нельзя).\n"
-        "   - *Восстановить тему*: Восстановить завершённую тему для повторного изучения.\n"
-        "   - *Категории*: Создать, переименовать, удалить категории или перенести темы.\n"
-        "🔹 Напиши **'Повторил <название темы>'**, чтобы отметить повторение вручную.\n\n"
-        "⏰ **Часовой пояс**\n"
-        "Чтобы напоминания приходили вовремя, убедись, что твой часовой пояс настроен правильно. "
-        "Используй /tz для изменения (например, '/tz Europe/Moscow' или '/tz UTC+8').\n\n"
-        "Готов начать? 😊 Попробуй добавить первую тему через кнопку 'Добавить тему' или настрой часовой пояс с помощью /tz!"
+        "🚀 Твой персональный тренер памяти - запоминай навсегда!\n\n"
+
+        "💡 Научный подход к запоминанию:\n"
+        "Наш мозг забывает информацию по определённой кривой (кривая Эббингауза). "
+        "90% информации забывается за первые 24 часа, если её не повторить!\n\n"
+
+        "🎯 Почему именно такая последовательность?\n"
+        "1 час - фиксируем в кратковременной памяти\n"
+        "1 день - переносим в среднесрочную память  \n"
+        "3 дня - усиливаем нейронные связи\n"
+        "1-2 недели - закрепляем в долговременной памяти\n"
+        "1-3 месяца - окончательно фиксируем\n\n"
+
+        "📊 Результат: После 7 повторений информация переходит в долговременную память "
+        "и остаётся с тобой на годы!\n\n"
+
+        "🔬 Это не просто цифры:\n"
+        "Метод интервального повторения научно доказан и используется:\n"
+        "• В обучении врачей и пилотов\n"
+        "• При изучении иностранных языков\n"
+        "• В подготовке к серьёзным экзаменам\n"
+        "• Спортсменами для запоминания тактик\n\n"
+
+        "🎯 Что можно учить:\n"
+        "• Иностранные слова и фразы\n"
+        "• Научные термины и формулы\n"
+        "• Исторические даты и факты\n"
+        "• Код и алгоритмы\n"
+        "• Подготовка к экзаменам\n"
+        "• И всё что угодно!\n\n"
+
+        "🛠 Быстрый старт:\n"
+        "1. Добавь тему - начни с 2-3 тем\n"
+        "2. Отмечай «Повторил!» по напоминаниям\n"
+        "3. Следи за прогрессом - смотри как знания закрепляются\n"
+        "4. Достигай 100% - получай знания навсегда!\n\n"
+
+        "📋 Основные команды:\n"
+        "• Добавить тему - создать новую тему\n"
+        "• Мой прогресс - увидеть прогресс\n"
+        "• Категории - организовать темы\n"
+        "• Восстановить тему - повторить завершённое\n\n"
+
+        "💫 Попробуй всего 1 тему и увидишь как это работает!\n"
+        "Через неделю ты удивишься сколько запомнил без усилий.\n\n"
+
+        "🎉 Готов начать? Нажми «Добавить тему» и убедись сам!\n\n"
+        "❓ Есть вопросы? Пиши: @garage_pineapple"
     )
 
     await update.message.reply_text(
         help_text,
-        reply_markup=MAIN_KEYBOARD,
-        parse_mode="Markdown"
+        reply_markup=MAIN_KEYBOARD
+        # Убрал parse_mode чтобы избежать ошибок форматирования
     )
     logger.debug(f"Sent help response to user {user_id}")
 
@@ -398,15 +449,142 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer()
         return
 
+    if data.startswith("delete_category_select:"):
+        category_id_str = data.split(":", 1)[1]
+        category_id = int(category_id_str) if category_id_str != "none" else None
+
+        # Получаем темы для выбранной категории
+        topics = db.get_active_topics(user_id, user.timezone, category_id=category_id)
+
+        if not topics:
+            await query.answer("В этой категории нет тем для удаления! 😿")
+            return
+
+        # Создаем клавиатуру с темами выбранной категории
+        keyboard = []
+        for topic in topics:
+            category_name = db.get_category(topic.category_id,
+                                            user_id).category_name if topic.category_id else "📁 Без категории"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{topic.topic_name} ({category_name})",
+                    callback_data=f"delete:{topic.topic_id}"
+                )
+            ])
+
+        # Добавляем кнопку "Назад к категориям"
+        keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+        await query.message.edit_text(
+            f"Выбери тему для удаления из категории '{category_name}':",
+            reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_topic_deletion"
+        await query.answer()
+        return
+
+    if data == "delete_all_topics":
+        # Оставляем старый функционал для тех, кто хочет видеть все темы сразу
+        topics = db.get_active_topics(user_id, user.timezone, category_id='all')
+        if not topics:
+            await query.answer("У тебя нет тем для удаления! 😿")
+            return
+
+        # Ограничиваем количество выводимых тем (например, первые 20)
+        limited_topics = topics[:20]
+
+        keyboard = []
+        for topic in limited_topics:
+            category_name = db.get_category(topic.category_id,
+                                            user_id).category_name if topic.category_id else "📁 Без категории"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{topic.topic_name} ({category_name})",
+                    callback_data=f"delete:{topic.topic_id}"
+                )
+            ])
+
+        # Если тем больше 20, показываем сообщение
+        if len(topics) > 20:
+            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+            await query.message.edit_text(
+                f"Слишком много тем для отображения ({len(topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+            await query.message.edit_text(
+                "Выбери тему для удаления (восстановить будет нельзя):",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        context.user_data["state"] = "awaiting_topic_deletion"
+        await query.answer()
+        return
+
+    if data == "back_to_delete_categories":
+        # Возвращаемся к выбору категорий
+        categories = db.get_categories(user_id)
+
+        keyboard = []
+        for category in categories:
+            topics_in_category = db.get_active_topics(user_id, user.timezone, category.category_id)
+            if topics_in_category:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{category.category_name} ({len(topics_in_category)})",
+                        callback_data=f"delete_category_select:{category.category_id}"
+                    )
+                ])
+
+        topics_no_category = db.get_active_topics(user_id, user.timezone, category_id=None)
+        if topics_no_category:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📁 Без категории ({len(topics_no_category)})",
+                    callback_data="delete_category_select:none"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("🔍 Все темы сразу", callback_data="delete_all_topics")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            "Выбери категорию для удаления тем:",
+            reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_delete_category"
+        await query.answer()
+        return
+
     if data.startswith("delete:"):
         topic_id = int(data.split(":", 1)[1])
+
+        # Сначала получаем все напоминания ДО удаления темы
+        reminders = db.get_reminders_by_topic(topic_id)
+
         if db.delete_topic(topic_id, user_id):
+            # Удаляем все напоминания этой темы из планировщика
+            for reminder in reminders:
+                job_id = f"reminder_{reminder.reminder_id}_{user_id}"
+                job = scheduler.get_job(job_id)
+                if job:
+                    job.remove()  # Исправлено: используем job.remove() вместо scheduler.remove_job()
+                    logger.debug(f"Removed scheduled job {job_id} for deleted topic")
+                else:
+                    logger.debug(f"Job {job_id} not found in scheduler (maybe already executed)")
+
             await query.message.delete()
             await query.message.reply_text(
-                "Тема удалена навсегда! 😿",
+                "Тема и все связанные напоминания удалены! 😿",
                 reply_markup=MAIN_KEYBOARD
             )
-            logger.debug(f"User {user_id} deleted topic {topic_id}")
+            logger.debug(f"User {user_id} deleted topic {topic_id} with all reminders")
         else:
             await query.message.delete()
             await query.message.reply_text(
@@ -414,6 +592,136 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=MAIN_KEYBOARD
             )
         context.user_data["state"] = None
+        await query.answer()
+        return
+
+    if data.startswith("restore_category_select:"):
+        category_id_str = data.split(":", 1)[1]
+        category_id = int(category_id_str) if category_id_str != "none" else None
+
+        # Получаем все завершенные темы
+        completed_topics = db.get_completed_topics(user_id)
+
+        # Фильтруем темы по выбранной категории
+        if category_id is not None:
+            filtered_topics = [t for t in completed_topics if t.category_id == category_id]
+        else:
+            filtered_topics = [t for t in completed_topics if t.category_id is None]
+
+        if not filtered_topics:
+            await query.answer("В этой категории нет завершённых тем! 😿")
+            return
+
+        # Создаем клавиатуру с темами выбранной категории
+        keyboard = []
+        for topic in filtered_topics:
+            category_name = db.get_category(topic.category_id,
+                                            user_id).category_name if topic.category_id else "📁 Без категории"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{topic.topic_name} ({category_name})",
+                    callback_data=f"restore:{topic.completed_topic_id}"
+                )
+            ])
+
+        keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+        await query.message.edit_text(
+            f"Выбери тему для восстановления из категории '{category_name}':",
+            reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_topic_restoration"
+        await query.answer()
+        return
+
+    if data == "restore_all_topics":
+        completed_topics = db.get_completed_topics(user_id)
+        if not completed_topics:
+            await query.answer("У тебя нет завершённых тем для восстановления! 😿")
+            return
+
+        # Ограничиваем количество выводимых тем
+        limited_topics = completed_topics[:20]
+
+        keyboard = []
+        for topic in limited_topics:
+            category_name = db.get_category(topic.category_id,
+                                            user_id).category_name if topic.category_id else "📁 Без категории"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{topic.topic_name} ({category_name})",
+                    callback_data=f"restore:{topic.completed_topic_id}"
+                )
+            ])
+
+        if len(completed_topics) > 20:
+            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+            await query.message.edit_text(
+                f"Слишком много тем для отображения ({len(completed_topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+            await query.message.edit_text(
+                "Выбери завершённую тему для восстановления:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        context.user_data["state"] = "awaiting_topic_restoration"
+        await query.answer()
+        return
+
+    if data == "back_to_restore_categories":
+        # Возвращаемся к выбору категорий для восстановления
+        completed_topics = db.get_completed_topics(user_id)
+
+        categories_dict = {}
+        no_category_topics = []
+
+        for topic in completed_topics:
+            if topic.category_id:
+                if topic.category_id not in categories_dict:
+                    category = db.get_category(topic.category_id, user_id)
+                    if category:
+                        categories_dict[topic.category_id] = {
+                            'name': category.category_name,
+                            'topics': []
+                        }
+                categories_dict[topic.category_id]['topics'].append(topic)
+            else:
+                no_category_topics.append(topic)
+
+        keyboard = []
+
+        for category_id, category_data in categories_dict.items():
+            if category_data['topics']:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{category_data['name']} ({len(category_data['topics'])})",
+                        callback_data=f"restore_category_select:{category_id}"
+                    )
+                ])
+
+        if no_category_topics:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📁 Без категории ({len(no_category_topics)})",
+                    callback_data="restore_category_select:none"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("🔍 Все темы сразу", callback_data="restore_all_topics")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            "Выбери категорию для восстановления тем:",
+            reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_restore_category"
         await query.answer()
         return
 
@@ -640,10 +948,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data.startswith("repeated:"):
         reminder_id = int(data.split(":", 1)[1])
+
+        # Сначала проверяем, существует ли вообще такое напоминание
+        reminder = db.get_reminder(reminder_id)
+        if not reminder:
+            await query.answer("Напоминание не найдено. Возможно, тема была удалена. 😿")
+            await query.message.delete()
+            return
+
         topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
         if not topic:
-            await query.answer("Тема не найдена. 😿")
+            await query.answer("Тема не найдена. Возможно, она была удалена. 😿")
+            await query.message.delete()
             return
+
         topic_name = topic.topic_name
         result = db.mark_topic_repeated_by_reminder(reminder_id, user_id, user.timezone)
         if not result:
@@ -869,24 +1187,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "Удалить тему":
-        topics = db.get_active_topics(user_id, user.timezone, category_id='all')
-        if not topics:
+        categories = db.get_categories(user_id)
+        if not categories and not db.get_active_topics(user_id, user.timezone, category_id=None):
             await update.message.reply_text(
                 "У тебя нет тем для удаления! 😿",
                 reply_markup=MAIN_KEYBOARD
             )
             return
-        keyboard = [
-            [InlineKeyboardButton(
-                f"{topic.topic_name} ({db.get_category(topic.category_id, user_id).category_name if topic.category_id else '📁 Без категории'})",
-                callback_data=f"delete:{topic.topic_id}"
-            )] for topic in topics
-        ]
+
+        keyboard = []
+        # Добавляем кнопки для категорий
+        for category in categories:
+            # Получаем количество тем в категории для отображения
+            topics_in_category = db.get_active_topics(user_id, user.timezone, category.category_id)
+            if topics_in_category:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{category.category_name} ({len(topics_in_category)})",
+                        callback_data=f"delete_category_select:{category.category_id}"
+                    )
+                ])
+
+        # Добавляем кнопку для тем без категории
+        topics_no_category = db.get_active_topics(user_id, user.timezone, category_id=None)
+        if topics_no_category:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📁 Без категории ({len(topics_no_category)})",
+                    callback_data="delete_category_select:none"
+                )
+            ])
+
+        # Добавляем кнопку "Все темы" (опционально, если нужно)
+        keyboard.append([
+            InlineKeyboardButton("🔍 Все темы сразу", callback_data="delete_all_topics")
+        ])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "Выбери тему для удаления (восстановить будет нельзя):", reply_markup=reply_markup
+            "Выбери категорию для удаления тем:",
+            reply_markup=reply_markup
         )
-        context.user_data["state"] = "awaiting_topic_deletion"
+        context.user_data["state"] = "awaiting_delete_category"
         return
 
     if text == "Восстановить тему":
@@ -897,15 +1239,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=MAIN_KEYBOARD
             )
             return
-        keyboard = [
-            [InlineKeyboardButton(topic.topic_name, callback_data=f"restore:{topic.completed_topic_id}")]
-            for topic in completed_topics
-        ]
+
+        # Группируем завершенные темы по категориям
+        categories_dict = {}
+        no_category_topics = []
+
+        for topic in completed_topics:
+            if topic.category_id:
+                if topic.category_id not in categories_dict:
+                    # Получаем название категории
+                    category = db.get_category(topic.category_id, user_id)
+                    if category:
+                        categories_dict[topic.category_id] = {
+                            'name': category.category_name,
+                            'topics': []
+                        }
+                categories_dict[topic.category_id]['topics'].append(topic)
+            else:
+                no_category_topics.append(topic)
+
+        keyboard = []
+
+        # Добавляем кнопки для категорий
+        for category_id, category_data in categories_dict.items():
+            if category_data['topics']:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{category_data['name']} ({len(category_data['topics'])})",
+                        callback_data=f"restore_category_select:{category_id}"
+                    )
+                ])
+
+        # Добавляем кнопку для тем без категории
+        if no_category_topics:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📁 Без категории ({len(no_category_topics)})",
+                    callback_data="restore_category_select:none"
+                )
+            ])
+
+        # Добавляем кнопку "Все темы"
+        keyboard.append([
+            InlineKeyboardButton("🔍 Все темы сразу", callback_data="restore_all_topics")
+        ])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "Выбери завершённую тему для восстановления:", reply_markup=reply_markup
+            "Выбери категорию для восстановления тем:",
+            reply_markup=reply_markup
         )
-        context.user_data["state"] = "awaiting_topic_restoration"
+        context.user_data["state"] = "awaiting_restore_category"
         return
 
     if text == "Категории":

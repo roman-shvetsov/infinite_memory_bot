@@ -447,6 +447,71 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
+    def delete_topic_reminders(self, topic_id):
+        """Удаляет все напоминания для указанной темы"""
+        session = self.Session()
+        try:
+            session.query(Reminder).filter_by(topic_id=topic_id).delete()
+            session.commit()
+            logger.debug(f"Deleted all reminders for topic {topic_id}")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error deleting reminders for topic {topic_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def delete_topic(self, topic_id, user_id):
+        session = self.Session()
+        try:
+            topic = session.query(Topic).filter_by(topic_id=topic_id, user_id=user_id).first()
+            if topic:
+                # Сначала удаляем все напоминания для этой темы
+                session.query(Reminder).filter_by(topic_id=topic_id).delete()
+                # Затем удаляем саму тему
+                session.delete(topic)
+                session.commit()
+                logger.debug(f"User {user_id} deleted topic {topic_id} with all reminders")
+                return True
+            return False
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error deleting topic {topic_id} for user {user_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_reminders_by_topic(self, topic_id):
+        """Получает все напоминания для указанной темы"""
+        session = self.Session()
+        try:
+            reminders = session.query(Reminder).filter_by(topic_id=topic_id).all()
+            logger.debug(f"Found {len(reminders)} reminders for topic {topic_id}")
+            return reminders
+        except Exception as e:
+            logger.error(f"Error getting reminders for topic {topic_id}: {str(e)}")
+            return []
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def mark_topic_repeated(self, user_id, topic_name, timezone):
         session = self.Session()
         try:
