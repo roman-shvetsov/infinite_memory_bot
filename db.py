@@ -71,7 +71,6 @@ class Database:
     def __init__(self):
         self.engine = create_engine(
             os.getenv('DATABASE_URL'),
-            echo=True,
             poolclass=QueuePool,
             pool_size=5,
             max_overflow=10,
@@ -146,6 +145,7 @@ class Database:
             now_utc = self._to_utc_naive(now_local, timezone)
             next_review_local = now_local + timedelta(hours=1)
             next_review_utc = self._to_utc_naive(next_review_local, timezone)
+
             topic = Topic(
                 user_id=user_id,
                 category_id=category_id,
@@ -158,18 +158,20 @@ class Database:
                 is_completed=False
             )
             session.add(topic)
-            session.flush()
+
             reminder = Reminder(
                 user_id=user_id,
                 topic_id=topic.topic_id,
                 scheduled_time=next_review_utc
             )
             session.add(reminder)
-            session.flush()
+
             session.commit()
             return topic.topic_id, reminder.reminder_id
+
         except Exception as e:
             session.rollback()
+            logger.error(f"Error adding topic '{topic_name}' for user {user_id}: {str(e)}")
             raise
         finally:
             session.close()
