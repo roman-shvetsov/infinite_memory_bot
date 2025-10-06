@@ -24,61 +24,61 @@ from dotenv import load_dotenv
 import tenacity
 import aiohttp
 
-# Создаём папку для логов если её нет
-log_dir = '/var/log/infinite_memory_bot'
-os.makedirs(log_dir, exist_ok=True)
 
-# Формат логов: дата-время | имя модуля | уровень | сообщение
-log_formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+def setup_logging():
+    """Настройка логирования с автоматическим переключением файлов по дням"""
 
-# Основной файл логов (с ним будет работать logrotate)
-log_file = os.path.join(log_dir, 'bot.log')
+    log_dir = '/var/log/infinite_memory_bot'
+    os.makedirs(log_dir, exist_ok=True)
 
-# Создаём обработчик с ротацией по дням
-file_handler = logging.handlers.TimedRotatingFileHandler(
-    filename=log_file,           # основной файл логов
-    when='midnight',             # ротация каждый день в полночь
-    interval=1,                  # интервал 1 день
-    backupCount=30,              # храним 30 дней логов
-    encoding='utf-8'             # кодировка для русских символов
-)
-file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.DEBUG)  # пишем ВСЕ сообщения в файл
+    # Файл с сегодняшней датой
+    today = datetime.now().strftime("%d.%m.%Y")
+    log_file = os.path.join(log_dir, f'bot_{today}.log')
 
-# Обработчик для вывода в консоль (только важные сообщения)
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(log_formatter)
-console_handler.setLevel(logging.INFO)  # в консоль только INFO и выше
+    # Формат логов
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
 
-# Настраиваем корневой логгер (главный объект логирования)
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)     # минимальный уровень - DEBUG
+    # Файловый обработчик
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.DEBUG)
 
-# Удаляем старые обработчики если есть
-for handler in root_logger.handlers[:]:
-    root_logger.removeHandler(handler)
+    # Консольный обработчик
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
 
-# Добавляем наши обработчики
-root_logger.addHandler(file_handler)
-root_logger.addHandler(console_handler)
+    # Настройка корневого логгера
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
 
-# Создаём логгер для нашего основного модуля
-logger = logging.getLogger(__name__)
+    # Очистка старых обработчиков
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
-# Уменьшаем логирование сторонних библиотек (чтобы не засоряли логи)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    # Добавление новых обработчиков
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
-# Логируем запуск системы логирования
-logger.info("=" * 50)
-logger.info("Система логирования инициализирована")
-logger.info(f"Логи пишутся в: {log_file}")
-logger.info("=" * 50)
+    # Тихие библиотеки
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 50)
+    logger.info(f"Логирование запущено в файл: {log_file}")
+    logger.info("=" * 50)
+
+    return logger
+
+
+# Инициализируем логирование
+logger = setup_logging()
 
 # Загрузка переменных окружения
 load_dotenv()
