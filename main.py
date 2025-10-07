@@ -2,6 +2,7 @@ import logging.handlers
 import os
 import re
 import signal
+import time
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -52,21 +53,20 @@ def setup_logging():
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)
 
-
     # Настройка корневого логгера
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
-    #file_handler.setLevel(logging.DEBUG)  # Временно для отладки
-    #console_handler.setLevel(logging.DEBUG)  # Временно для отладки
-    #root_logger.setLevel(logging.DEBUG)  # Временно для отладки
+    file_handler.setLevel(logging.DEBUG)  # Временно для отладки
+    console_handler.setLevel(logging.DEBUG)  # Временно для отладки
+    root_logger.setLevel(logging.DEBUG)  # Временно для отладки
 
     # Полная очистка всех существующих обработчиков
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
     # Очистка обработчиков у наших логгеров
-    for logger_name in ['__main__', 'sqlalchemy', 'telegram', 'apscheduler', 'aiohttp']:
+    for logger_name in ['__main__', 'sqlalchemy', 'telegram', 'apscheduler', 'aiohttp', 'httpx', 'httpcore']:
         logger = logging.getLogger(logger_name)
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
@@ -89,6 +89,29 @@ def setup_logging():
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+    # НАСТРАИВАЕМ HTTPX НА ЛОГИРОВАНИЕ ТОЛЬКО КАЖДЫЕ 60 СЕКУНД
+    class ThrottledFilter(logging.Filter):
+        def __init__(self):
+            super().__init__()
+            self.last_log_time = 0
+            self.throttle_interval = 60  # 60 секунд
+
+        def filter(self, record):
+            current_time = time.time()
+            if current_time - self.last_log_time >= self.throttle_interval:
+                self.last_log_time = current_time
+                return True
+            return False
+
+    # Применяем фильтр к httpx и httpcore
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.setLevel(logging.INFO)  # Включаем обратно
+    httpx_logger.addFilter(ThrottledFilter())
+
+    httpcore_logger = logging.getLogger("httpcore")
+    httpcore_logger.setLevel(logging.INFO)  # Включаем обратно
+    httpcore_logger.addFilter(ThrottledFilter())
+
     # Наш основной логгер
     logger = logging.getLogger(__name__)
 
@@ -101,6 +124,7 @@ def setup_logging():
     logger.info("=" * 50)
     logger.info(f"Логирование запущено в файл: {log_file}")
     logger.info("SQLAlchemy echo: DISABLED")
+    logger.info("httpx/httpcore logging: THROTTLED (60s)")
     logger.info("=" * 50)
 
     return logger
@@ -127,6 +151,10 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [["Мой прогресс", "Добавить тему"], ["Удалить тему", "Восстановить тему"], ["Категории"]],
     resize_keyboard=True
 )
+
+# Лимиты для пользователей
+MAX_ACTIVE_TOPICS = 60
+MAX_CATEGORIES = 10
 
 
 def parse_utc_offset(text: str) -> tuple:
@@ -376,6 +404,10 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
         )
         return
+
+    # Получаем общее количество активных тем для информации о лимите
+    all_active_topics = db.get_active_topics(user_id, user.timezone, category_id='all')
+
     categories = db.get_categories(user_id)
     keyboard = [
         [InlineKeyboardButton(category.category_name, callback_data=f"category_progress:{category.category_id}")]
@@ -383,7 +415,10 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard.append([InlineKeyboardButton("📁 Без категории", callback_data="category_progress:none")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "Выбери категорию для просмотра прогресса:"
+
+    text = f"📊 Активных тем: {len(all_active_topics)}/{MAX_ACTIVE_TOPICS}\n"
+    text += "Выбери категорию для просмотра прогресса:"
+
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text,
@@ -409,6 +444,7 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
     if not topics:
         reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="back_to_progress")]])
         text = f"В категории '{category_name}' пока нет тем! 😿"
+
         if update.callback_query:
             await update.callback_query.edit_message_text(
                 text,
@@ -426,6 +462,7 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
     now_utc = datetime.utcnow()
     now_local = pytz.utc.localize(now_utc).astimezone(tz)
     message = f"📚 {category_name} ({timezone}) 😺\n\n"
+
     for topic in topics:
         next_review_local = db._from_utc_naive(topic.next_review, timezone) if topic.next_review else None
         progress_percentage = (topic.completed_repetitions / total_repetitions) * 100
@@ -709,11 +746,27 @@ async def handle_category_action(query, context, parts, user_id):
     action = parts[1] if len(parts) > 1 else None
 
     if action == "create":
+        # ПРОВЕРКА ЛИМИТА СРАЗУ ПРИ ВЫБОРЕ "СОЗДАТЬ КАТЕГОРИЮ"
+        categories = db.get_categories(user_id)
+        if len(categories) >= MAX_CATEGORIES:
+            await query.message.reply_text(
+                f"❌ Достигнут лимит категорий ({MAX_CATEGORIES})! 😿\n\n"
+                f"Чтобы создать новую категорию, сначала удали одну из существующих.\n"
+                f"Сейчас у тебя {len(categories)} категорий.",
+                reply_markup=MAIN_KEYBOARD
+            )
+            logger.info(f"LIMIT_REACHED: User {user_id} reached category limit ({len(categories)}/{MAX_CATEGORIES})")
+            context.user_data["state"] = None
+            return
+
         context.user_data["state"] = "awaiting_category_name"
         await query.message.reply_text(
             "Напиши название новой категории! 😊",
             reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
         )
+
+        # Логирование начала создания категории
+        logger.info(f"USER_ACTION: User {user_id} starting to create new category ({len(categories)}/{MAX_CATEGORIES})")
     elif action == "rename":
         categories = db.get_categories(user_id)
         if not categories:
@@ -1333,7 +1386,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # Остальная часть функции без изменений...
     if state == "awaiting_category_name":
         if text == "Отмена":
             context.user_data["state"] = None
@@ -1342,6 +1394,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=MAIN_KEYBOARD
             )
             return
+
+        # Лимит уже проверен при нажатии кнопки "Создать категорию", так что здесь просто создаем
         try:
             category_id = db.add_category(user_id, text)
             keyboard = [
@@ -1349,6 +1403,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("Нет", callback_data="add_to_new_category:no")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Логирование создания категории
+            categories = db.get_categories(user_id)
+            logger.info(f"USER_ACTION: User {user_id} created category '{text}' ({len(categories)}/{MAX_CATEGORIES})")
+
             await update.message.reply_text(
                 f"Категория '{text}' создана! 😺 Добавить в неё темы?",
                 reply_markup=reply_markup
@@ -1471,11 +1530,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "Добавить тему":
+        # ПРОВЕРКА ЛИМИТА СРАЗУ ПРИ НАЖАТИИ КНОПКИ
+        active_topics = db.get_active_topics(user_id, user.timezone, category_id='all')
+        if len(active_topics) >= MAX_ACTIVE_TOPICS:
+            await update.message.reply_text(
+                f"❌ Достигнут лимит активных тем ({MAX_ACTIVE_TOPICS})! 😿\n\n"
+                f"Чтобы добавить новую тему, сначала заверши или удали одну из существующих.\n"
+                f"Сейчас у тебя {len(active_topics)} активных тем.\n\n"
+                f"💡 *Совет:* Лучше сосредоточься на качестве, а не количестве!",
+                reply_markup=MAIN_KEYBOARD,
+                parse_mode="Markdown"
+            )
+            logger.info(
+                f"LIMIT_REACHED: User {user_id} reached topic limit ({len(active_topics)}/{MAX_ACTIVE_TOPICS}) when trying to add topic")
+            return
+
+        # Если лимит не достигнут, переходим к вводу названия темы
         context.user_data["state"] = "awaiting_topic_name"
         await update.message.reply_text(
             "Напиши название темы, которую хочешь добавить! 😊",
             reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
         )
+
+        # Логирование начала создания темы
+        logger.info(f"USER_ACTION: User {user_id} starting to add new topic ({len(active_topics)}/{MAX_ACTIVE_TOPICS})")
         return
 
     if text == "Удалить тему":
@@ -1487,6 +1565,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "Категории":
+        # ПРОВЕРКА ЛИМИТА ПРИ СОЗДАНИИ КАТЕГОРИИ (если пользователь выберет создание)
+        categories = db.get_categories(user_id)
+
         keyboard = [
             [
                 InlineKeyboardButton("Создать категорию", callback_data="category_action:create"),
@@ -1498,8 +1579,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Добавляем информацию о лимите в сообщение
+        limit_info = f"\n\n📁 Категорий: {len(categories)}/{MAX_CATEGORIES}"
+
         await update.message.reply_text(
-            "Выбери действие с категориями:", reply_markup=reply_markup
+            f"Выбери действие с категориями:{limit_info}",
+            reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_category_action"
         return
@@ -1522,6 +1608,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=MAIN_KEYBOARD
             )
             return
+
         context.user_data["new_topic_name"] = text
         categories = db.get_categories(user_id)
         keyboard = [
