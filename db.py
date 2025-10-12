@@ -21,11 +21,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class User(Base):
     __tablename__ = 'users'
     user_id = Column(Integer, primary_key=True)
     username = Column(String)
     timezone = Column(String)
+
 
 class Topic(Base):
     __tablename__ = 'topics'
@@ -42,12 +44,14 @@ class Topic(Base):
     user = relationship("User")
     category = relationship("Category", back_populates="topics")
 
+
 class Reminder(Base):
     __tablename__ = 'reminders'
     reminder_id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.user_id'))
     topic_id = Column(Integer, ForeignKey('topics.topic_id'))
     scheduled_time = Column(DateTime)
+
 
 class CompletedTopic(Base):
     __tablename__ = 'completed_topics'
@@ -59,6 +63,7 @@ class CompletedTopic(Base):
     user = relationship("User")
     category = relationship("Category")
 
+
 class Category(Base):
     __tablename__ = 'categories'
     category_id = Column(Integer, primary_key=True)
@@ -66,6 +71,16 @@ class Category(Base):
     category_name = Column(String)
     user = relationship("User")
     topics = relationship("Topic", back_populates="category")
+
+
+class UserReactivation(Base):
+    __tablename__ = 'user_reactivation'
+    user_id = Column(Integer, ForeignKey('users.user_id'), primary_key=True)
+    last_activity = Column(DateTime)  # Последняя активность пользователя
+    last_reactivation_sent = Column(DateTime)  # Когда последний раз отправляли реактивацию
+    reactivation_stage = Column(Integer, default=0)  # 0-нет, 1-friendly, 2-sad, 3-angry, 4-final
+    is_active = Column(Boolean, default=True)  # Отправлять ли еще напоминания
+
 
 class Database:
     def __init__(self):
@@ -719,5 +734,84 @@ class Database:
         try:
             users = session.query(User).all()
             return users
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def update_user_activity(self, user_id):
+        """Обновляет время последней активности пользователя"""
+        session = self.Session()
+        try:
+            now_utc = datetime.utcnow()
+            reactivation = session.query(UserReactivation).filter_by(user_id=user_id).first()
+            if reactivation:
+                reactivation.last_activity = now_utc
+                # ВАЖНО: Сбрасываем стадию И возвращаем is_active в true при любой активности
+                if reactivation.reactivation_stage > 0:
+                    reactivation.reactivation_stage = 0
+                    reactivation.last_reactivation_sent = None
+                # ВОЗВРАЩАЕМ is_active в true при любой активности
+                reactivation.is_active = True
+            else:
+                reactivation = UserReactivation(
+                    user_id=user_id,
+                    last_activity=now_utc,
+                    is_active=True
+                )
+                session.add(reactivation)
+            session.commit()
+            logger.debug(f"Updated user activity for {user_id}")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating user activity for {user_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_inactive_users(self, days_inactive):
+        """Получает пользователей, которые не активны указанное количество дней"""
+        session = self.Session()
+        try:
+            cutoff_time = datetime.utcnow() - timedelta(days=days_inactive)
+            inactive_users = session.query(UserReactivation).filter(
+                UserReactivation.last_activity < cutoff_time,
+                UserReactivation.is_active == True
+            ).all()
+            return inactive_users
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def update_reactivation_stage(self, user_id, stage):
+        """Обновляет стадию реактивации пользователя"""
+        session = self.Session()
+        try:
+            reactivation = session.query(UserReactivation).filter_by(user_id=user_id).first()
+            if reactivation:
+                reactivation.reactivation_stage = stage
+                reactivation.last_reactivation_sent = datetime.utcnow()
+                if stage == 4:  # final stage
+                    reactivation.is_active = False
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating reactivation stage for {user_id}: {str(e)}")
+            raise
         finally:
             session.close()

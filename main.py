@@ -13,11 +13,13 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import random
+from kex_messages import REACTIVATION_MESSAGES
 from telegram.error import InvalidToken
 from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from db import Database
+from db import Database, UserReactivation
 import asyncio
 from dotenv import load_dotenv
 
@@ -152,10 +154,32 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+# Создаем папку для изображений если ее нет
+os.makedirs("images", exist_ok=True)
+logger.info(f"Images directory: {os.path.abspath('images')}")
+
 # Лимиты для пользователей
 MAX_ACTIVE_TOPICS = 60
 MAX_CATEGORIES = 10
 
+
+# ВРЕМЕННО ДЛЯ ТЕСТИРОВАНИЯ - уменьшаем сроки реактивации
+REACTIVATION_STAGES_TEST = [
+    (0.02, 1),   # через ~30 минут
+    (0.04, 2),   # через ~1 час
+    (0.06, 3),   # через ~1.5 часа
+    (0.08, 4)    # через ~2 часа
+]
+
+REACTIVATION_STAGES_PROD = [
+    (3, 1),   # через 3 дня - friendly
+    (7, 2),   # через 7 дней - sad
+    (14, 3),  # через 14 дней - angry
+    (30, 4)   # через 30 дней - final
+]
+
+# Переменная для переключения между тестовым и продакшен режимом
+TEST_MODE = False  # Поставьте False когда закончите тестирование
 
 def parse_utc_offset(text: str) -> tuple:
     """Преобразует UTC-смещение и возвращает (timezone, display_name)."""
@@ -397,6 +421,7 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    db.update_user_activity(user_id)
     user = db.get_user(user_id)
     if not user:
         await update.message.reply_text(
@@ -573,6 +598,7 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         return
 
     completed_repetitions, next_reminder_time, new_reminder_id = result
+    db.update_user_activity(user_id)
     total_repetitions = 7
     progress_percentage = (completed_repetitions / total_repetitions) * 100
     progress_bar = "█" * completed_repetitions + "░" * (total_repetitions - completed_repetitions)
@@ -1091,6 +1117,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     data = query.data
     user_id = update.effective_user.id
+    db.update_user_activity(user_id)
     user = db.get_user(user_id)
 
     if not user:
@@ -1304,6 +1331,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     user = db.get_user(user_id)
+    db.update_user_activity(user_id)
 
     # ДОБАВЬ ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
     logger.debug(
@@ -1650,6 +1678,107 @@ async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
         logger.error(f"REMINDER_ERROR: Failed to send reminder {reminder_id} to user {user_id}: {str(e)}")
 
 
+async def send_reactivation_message(bot, user_id: int, stage: int):
+    """Отправляет реактивационное сообщение пользователю"""
+    try:
+        user = db.get_user(user_id)
+        if not user:
+            logger.warning(f"REACTIVATION: User {user_id} not found in database")
+            return
+
+        # Определяем тип сообщения по стадии
+        if stage == 1:
+            mood = "friendly"
+        elif stage == 2:
+            mood = "sad"
+        elif stage == 3:
+            mood = "angry"
+        elif stage == 4:
+            mood = "final_warning"
+        else:
+            logger.warning(f"REACTIVATION: Unknown stage {stage} for user {user_id}")
+            return
+
+        # Выбираем случайное сообщение
+        messages = REACTIVATION_MESSAGES.get(mood, [])
+        if not messages:
+            logger.error(f"REACTIVATION: No messages found for mood {mood}")
+            return
+
+        message_data = random.choice(messages)
+        text = message_data["text"]
+        image_filename = message_data["image"]
+
+        logger.info(f"REACTIVATION: Sending {mood} message to user {user_id}: '{text}' with image: {image_filename}")
+
+        # Пробуем отправить с изображением
+        try:
+            # Сначала проверяем существует ли файл
+            image_path = f"images/{image_filename}"
+            logger.info(f"REACTIVATION: Looking for image at: {image_path}")
+
+            if os.path.exists(image_path):
+                logger.info(f"REACTIVATION: Image found, sending with photo...")
+                with open(image_path, 'rb') as photo:
+                    await bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo,
+                        caption=text
+                    )
+                logger.info(f"REACTIVATION: Photo sent successfully to user {user_id}")
+            else:
+                logger.warning(f"REACTIVATION: Image not found at {image_path}, sending text only")
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=text
+                )
+
+        except Exception as photo_error:
+            logger.error(f"REACTIVATION: Failed to send photo to user {user_id}: {str(photo_error)}")
+            # Fallback - отправляем только текст
+            logger.info(f"REACTIVATION: Falling back to text message for user {user_id}")
+            await bot.send_message(
+                chat_id=user_id,
+                text=text
+            )
+
+        # Обновляем стадию в БД
+        db.update_reactivation_stage(user_id, stage)
+
+        logger.info(f"REACTIVATION: Successfully sent {mood} message to user {user_id} (stage {stage})")
+
+    except Exception as e:
+        logger.error(f"REACTIVATION_ERROR: Failed to send reactivation to user {user_id}: {str(e)}")
+
+
+async def check_inactive_users(app: Application):
+    """Проверяет неактивных пользователей и отправляет реактивационные сообщения"""
+    try:
+        logger.info("REACTIVATION: Checking inactive users...")
+
+        # Выбираем stages в зависимости от режима
+        if TEST_MODE:
+            stages = REACTIVATION_STAGES_TEST
+            logger.info("REACTIVATION: Using TEST mode with reduced timings")
+        else:
+            stages = REACTIVATION_STAGES_PROD
+            logger.info("REACTIVATION: Using PRODUCTION mode")
+
+        for days, stage in stages:
+            inactive_users = db.get_inactive_users(days)
+            logger.info(f"REACTIVATION: Found {len(inactive_users)} users inactive for {days} days (stage {stage})")
+
+            for user_reactivation in inactive_users:
+                # Проверяем, не отправляли ли уже сообщение этой стадии
+                if user_reactivation.reactivation_stage < stage:
+                    await send_reactivation_message(app.bot, user_reactivation.user_id, stage)
+                    # Делаем небольшую паузу между сообщениями
+                    await asyncio.sleep(0.5)
+
+    except Exception as e:
+        logger.error(f"REACTIVATION_ERROR: Failed to check inactive users: {str(e)}")
+
+
 async def check_overdue_for_user(app: Application, user_id: int):
     user = db.get_user(user_id)
     if not user:
@@ -1678,18 +1807,37 @@ async def check_overdue_for_user(app: Application, user_id: int):
 
 def schedule_daily_check(user_id: int, timezone: str):
     job_id = f"daily_check_{user_id}"
+    reactivation_job_id = f"reactivation_{user_id}"
+
+    # Удаляем старые задания если есть
     if scheduler.get_job(job_id):
         scheduler.remove_job(job_id)
+    if scheduler.get_job(reactivation_job_id):
+        scheduler.remove_job(reactivation_job_id)
+
+    # Задание для проверки просроченных тем
     scheduler.add_job(
         check_overdue_for_user,
         'cron',
         hour=9,
         minute=0,
         timezone=timezone,
-        args=[app, user_id],  # app will be defined in main
+        args=[app, user_id],
         id=job_id
     )
-    logger.debug(f"Scheduled daily check for user {user_id} at 9:00 {timezone}")
+
+    # Задание для реактивации
+    scheduler.add_job(
+        check_inactive_users,
+        'cron',
+        hour=22,
+        minute=10,
+        timezone=timezone,
+        args=[app],
+        id=reactivation_job_id
+    )
+
+    logger.debug(f"Scheduled daily checks for user {user_id} at 9:00 and reactivation at 19:00 {timezone}")
 
 
 async def init_scheduler(app: Application):
@@ -1705,6 +1853,30 @@ async def init_scheduler(app: Application):
         tz = pytz.timezone(user.timezone)
         scheduled_count = 0
         skipped_count = 0
+
+        # Добавляем ежедневную проверку неактивных пользователей в 19:00
+        scheduler.add_job(
+            check_inactive_users,
+            'cron',
+            hour=19,
+            minute=0,
+            timezone="UTC",  # Будет переопределено для каждого пользователя
+            args=[app],
+            id="reactivation_check"
+        )
+
+        # Для каждого пользователя создаем отдельное задание в его часовом поясе
+        users = db.get_all_users()
+        for user in users:
+            scheduler.add_job(
+                check_inactive_users,
+                'cron',
+                hour=19,
+                minute=0,
+                timezone=user.timezone,
+                args=[app],
+                id=f"reactivation_{user.user_id}"
+            )
 
         for reminder in reminders:
             topic = db.get_topic_by_reminder_id(reminder.reminder_id, user.user_id, user.timezone)
