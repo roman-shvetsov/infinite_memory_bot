@@ -3,6 +3,8 @@ import os
 import re
 import signal
 import time
+import sys
+import locale
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -23,6 +25,24 @@ from db import Database, UserReactivation
 import asyncio
 from dotenv import load_dotenv
 
+# Принудительно устанавливаем UTF-8
+if sys.stdout.encoding != 'UTF-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+if sys.stderr.encoding != 'UTF-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
+# Проверяем и устанавливаем локаль
+try:
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'C.UTF-8')
+    except:
+        pass
+
+print(f"Stdout encoding: {sys.stdout.encoding}")
+print(f"Stderr encoding: {sys.stderr.encoding}")
 
 def setup_logging():
     """Настройка логирования с фильтрацией лишних сообщений"""
