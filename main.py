@@ -25,34 +25,15 @@ from db import Database, UserReactivation
 import asyncio
 from dotenv import load_dotenv
 
-# Принудительно устанавливаем UTF-8
-if sys.stdout.encoding != 'UTF-8':
-    sys.stdout.reconfigure(encoding='utf-8')
-
-if sys.stderr.encoding != 'UTF-8':
-    sys.stderr.reconfigure(encoding='utf-8')
-
-# Проверяем и устанавливаем локаль
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-except:
-    try:
-        locale.setlocale(locale.LC_ALL, 'C.UTF-8')
-    except:
-        pass
-
-print(f"Stdout encoding: {sys.stdout.encoding}")
-print(f"Stderr encoding: {sys.stderr.encoding}")
 
 def setup_logging():
-    """Настройка логирования с фильтрацией лишних сообщений"""
+    """Настройка логирования с автоматической ротацией по дням в МОСКОВСКОМ времени"""
 
     log_dir = '/var/log/infinite_memory_bot'
     os.makedirs(log_dir, exist_ok=True)
 
-    # Файл с сегодняшней датой
-    today = datetime.now().strftime("%d.%m.%Y")
-    log_file = os.path.join(log_dir, f'bot_{today}.log')
+    # Базовое имя файла (без даты)
+    log_file = os.path.join(log_dir, 'bot.log')
 
     # Формат логов
     formatter = logging.Formatter(
@@ -60,15 +41,18 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Файловый обработчик с ротацией И ПРАВИЛЬНОЙ КОДИРОВКОЙ
-    file_handler = logging.handlers.RotatingFileHandler(
+    # Таймированная ротация - каждый день в полночь ПО МОСКОВСКОМУ ВРЕМЕНИ
+    file_handler = logging.handlers.TimedRotatingFileHandler(
         log_file,
-        encoding='utf-8',  # УБЕДИТЕСЬ ЧТО encoding='utf-8'
-        maxBytes=5 * 1024 * 1024,  # 5 MB
-        backupCount=3
+        when='midnight',  # Ротация в полночь
+        interval=1,  # Каждый день
+        backupCount=7,  # Хранить 7 дней логов
+        encoding='utf-8',
+        utc=False  # НЕ использовать UTC - использовать системное время
     )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
+    file_handler.suffix = "%d.%m.%Y.log"  # Формат суффикса для backup файлов
 
     # Консольный обработчик
     console_handler = logging.StreamHandler()
@@ -79,9 +63,9 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
-    file_handler.setLevel(logging.DEBUG)  # Временно для отладки
-    console_handler.setLevel(logging.DEBUG)  # Временно для отладки
-    root_logger.setLevel(logging.DEBUG)  # Временно для отладки
+    file_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.DEBUG)
 
     # Полная очистка всех существующих обработчиков
     for handler in root_logger.handlers[:]:
@@ -95,7 +79,7 @@ def setup_logging():
 
     # Добавление наших обработчиков
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+    root_handler.addHandler(console_handler)
 
     # Жесткое ограничение уровня для шумных библиотек
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
@@ -127,11 +111,11 @@ def setup_logging():
 
     # Применяем фильтр к httpx и httpcore
     httpx_logger = logging.getLogger("httpx")
-    httpx_logger.setLevel(logging.INFO)  # Включаем обратно
+    httpx_logger.setLevel(logging.INFO)
     httpx_logger.addFilter(ThrottledFilter())
 
     httpcore_logger = logging.getLogger("httpcore")
-    httpcore_logger.setLevel(logging.INFO)  # Включаем обратно
+    httpcore_logger.setLevel(logging.INFO)
     httpcore_logger.addFilter(ThrottledFilter())
 
     # Наш основной логгер
@@ -143,12 +127,13 @@ def setup_logging():
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
-    # ТЕСТИРУЕМ КИРИЛЛИЦУ СРАЗУ
     logger.info("=" * 50)
     logger.info(f"Логирование запущено в файл: {log_file}")
+    logger.info("Автоматическая ротация: каждый день в полночь по МОСКОВСКОМУ времени")
+    logger.info("Храним логи за 7 дней")
     logger.info("SQLAlchemy echo: DISABLED")
     logger.info("httpx/httpcore logging: THROTTLED (60s)")
-    logger.info("Кодировка: UTF-8")  # ТЕСТ КИРИЛЛИЦЫ
+    logger.info("Кодировка: UTF-8")
     logger.info("=" * 50)
 
     return logger
@@ -612,16 +597,19 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         return
 
     topic_name = topic.topic_name
-    logger.info(f"USER_ACTION: User {user_id} marked topic '{topic_name}' as repeated (reminder_id: {reminder_id})")
+    logger.info(f"TOPIC_REPEATED: User {user_id} marked topic {topic.topic_id} as repeated via button (reminder_id: {reminder_id})")
     result = db.mark_topic_repeated_by_reminder(reminder_id, user_id, user.timezone)
 
     if not result:
+        logger.error(f"DB_ERROR: Failed to mark topic {topic.topic_id} as repeated for user {user_id}")
         await query.answer("Ошибка при отметке повторения. 😔")
         return
 
     completed_repetitions, next_reminder_time, new_reminder_id = result
     db.update_user_activity(user_id)
     total_repetitions = 7
+    logger.info(
+        f"TOPIC_PROGRESS: Topic {topic.topic_id} - {completed_repetitions}/{total_repetitions} repetitions completed")
     progress_percentage = (completed_repetitions / total_repetitions) * 100
     progress_bar = "█" * completed_repetitions + "░" * (total_repetitions - completed_repetitions)
 
@@ -1689,7 +1677,7 @@ async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Логирование отправки напоминания
-        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
+        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} to user {user_id}")
 
         await bot.send_message(
             chat_id=user_id,
@@ -1824,7 +1812,7 @@ async def check_overdue_for_user(app: Application, user_id: int):
                 text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic.topic_name}'! 😺",
                 reply_markup=reply_markup
             )
-            logger.debug(f"Sent overdue reminder for topic '{topic.topic_name}' to user {user_id}")
+            logger.info(f"OVERDUE_REMINDER: Sent overdue reminder for topic {topic.topic_id} to user {user_id}")
 
 
 def schedule_daily_check(user_id: int, timezone: str):
