@@ -40,10 +40,10 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Файловый обработчик с ротацией
+    # Файловый обработчик с ротацией И ПРАВИЛЬНОЙ КОДИРОВКОЙ
     file_handler = logging.handlers.RotatingFileHandler(
         log_file,
-        encoding='utf-8',
+        encoding='utf-8',  # УБЕДИТЕСЬ ЧТО encoding='utf-8'
         maxBytes=5 * 1024 * 1024,  # 5 MB
         backupCount=3
     )
@@ -123,10 +123,12 @@ def setup_logging():
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
+    # ТЕСТИРУЕМ КИРИЛЛИЦУ СРАЗУ
     logger.info("=" * 50)
     logger.info(f"Логирование запущено в файл: {log_file}")
     logger.info("SQLAlchemy echo: DISABLED")
     logger.info("httpx/httpcore logging: THROTTLED (60s)")
+    logger.info("Кодировка: UTF-8")  # ТЕСТ КИРИЛЛИЦЫ
     logger.info("=" * 50)
 
     return logger
