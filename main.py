@@ -3,8 +3,6 @@ import os
 import re
 import signal
 import time
-import sys
-import locale
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -79,7 +77,7 @@ def setup_logging():
 
     # Добавление наших обработчиков
     root_logger.addHandler(file_handler)
-    root_handler.addHandler(console_handler)
+    root_logger.addHandler(console_handler)
 
     # Жесткое ограничение уровня для шумных библиотек
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
