@@ -553,8 +553,12 @@ async def handle_timezone_callback(query, context, parts, user_id):
         logger.debug(f"User {user_id} set state to: awaiting_manual_timezone")
     else:
         try:
+            # ВАЖНО: Сохраняем пользователя перед обновлением активности
             db.save_user(user_id, query.from_user.username or "", timezone)
             schedule_daily_check(user_id, timezone)
+
+            # Теперь можно обновлять активность
+            db.update_user_activity(user_id)
 
             # ВАЖНО: Сбрасываем состояние после успешного сохранения
             context.user_data["state"] = None

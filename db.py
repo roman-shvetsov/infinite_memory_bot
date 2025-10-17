@@ -747,6 +747,12 @@ class Database:
         """Обновляет время последней активности пользователя"""
         session = self.Session()
         try:
+            # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ПОЛЬЗОВАТЕЛЯ ПРЕЖДЕ ЧЕМ ОБНОВЛЯТЬ АКТИВНОСТЬ
+            user = session.query(User).filter_by(user_id=user_id).first()
+            if not user:
+                logger.debug(f"User {user_id} not found in users table, skipping activity update")
+                return
+
             now_utc = datetime.utcnow()
             reactivation = session.query(UserReactivation).filter_by(user_id=user_id).first()
             if reactivation:
