@@ -231,7 +231,9 @@ def parse_utc_offset(text: str) -> tuple:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Received /start command from user {update.effective_user.id}")
-    user = db.get_user(update.effective_user.id)
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+
     if user:
         await update.message.reply_text(
             f"С возвращением, {update.effective_user.first_name}! 😺\n"
@@ -242,6 +244,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD
         )
     else:
+        # СОХРАНЯЕМ ПОЛЬЗОВАТЕЛЯ СРАЗУ ПРИ /start (с временным часовым поясом UTC)
+        db.save_user(user_id, update.effective_user.username or "", "UTC")
+
         await update.message.reply_text(
             "🚀 *Добро пожаловать в твоего персонального тренера памяти!*\n\n"
 
@@ -553,14 +558,14 @@ async def handle_timezone_callback(query, context, parts, user_id):
         logger.debug(f"User {user_id} set state to: awaiting_manual_timezone")
     else:
         try:
-            # ВАЖНО: Сохраняем пользователя перед обновлением активности
+            # ОБНОВЛЯЕМ часовой пояс пользователя (он уже сохранен при /start)
             db.save_user(user_id, query.from_user.username or "", timezone)
             schedule_daily_check(user_id, timezone)
 
-            # Теперь можно обновлять активность
+            # Обновляем активность
             db.update_user_activity(user_id)
 
-            # ВАЖНО: Сбрасываем состояние после успешного сохранения
+            # Сбрасываем состояние
             context.user_data["state"] = None
             context.user_data.clear()
 
@@ -568,7 +573,7 @@ async def handle_timezone_callback(query, context, parts, user_id):
                 f"Часовой пояс {timezone} сохранен! 😺",
                 reply_markup=MAIN_KEYBOARD
             )
-            logger.info(f"User {user_id} set timezone to {timezone}")
+            logger.info(f"User {user_id} updated timezone to {timezone}")
         except Exception as e:
             logger.error(f"Error saving timezone for user {user_id}: {str(e)}")
             await query.message.reply_text(
