@@ -113,6 +113,26 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
+    def delete_reminder(self, reminder_id):
+        """Удаляет напоминание по ID"""
+        session = self.Session()
+        try:
+            session.query(Reminder).filter_by(reminder_id=reminder_id).delete()
+            session.commit()
+            logger.debug(f"Deleted reminder {reminder_id}")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error deleting reminder {reminder_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def save_user(self, user_id, username, timezone):
         session = self.Session()
         try:

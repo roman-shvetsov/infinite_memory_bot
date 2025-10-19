@@ -1811,29 +1811,46 @@ async def check_inactive_users(app: Application):
 
 
 async def check_overdue_for_user(app: Application, user_id: int):
-    user = db.get_user(user_id)
-    if not user:
-        return
-    tz = pytz.timezone(user.timezone)
-    now_utc = datetime.utcnow()
-    now_local = pytz.utc.localize(now_utc).astimezone(tz)
-    topics = db.get_active_topics(user_id, user.timezone, 'all')
-    for topic in topics:
-        if topic.next_review is None or topic.is_completed:
-            continue
-        next_review_utc = topic.next_review  # utc naive
-        next_review_local = db._from_utc_naive(next_review_utc, user.timezone)
-        if next_review_local < now_local:
-            # Create temporary reminder for button
-            reminder_id = db.add_reminder(user_id, topic.topic_id, now_utc)
-            keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await app.bot.send_message(
-                chat_id=user_id,
-                text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic.topic_name}'! 😺",
-                reply_markup=reply_markup
-            )
-            logger.info(f"OVERDUE_REMINDER: Sent overdue reminder for topic {topic.topic_id} to user {user_id}")
+    """Проверяет и отправляет просроченные напоминания для пользователя"""
+    try:
+        user = db.get_user(user_id)
+        if not user:
+            logger.warning(f"OVERDUE_CHECK: User {user_id} not found")
+            return
+
+        tz = pytz.timezone(user.timezone)
+        now_utc = datetime.utcnow()
+        now_local = pytz.utc.localize(now_utc).astimezone(tz)
+
+        topics = db.get_active_topics(user_id, user.timezone, 'all')
+        overdue_count = 0
+
+        for topic in topics:
+            if topic.next_review is None or topic.is_completed:
+                continue
+
+            next_review_utc = topic.next_review  # utc naive
+            next_review_local = db._from_utc_naive(next_review_utc, user.timezone)
+
+            if next_review_local < now_local:
+                # Создаем временное напоминание для кнопки
+                reminder_id = db.add_reminder(user_id, topic.topic_id, now_utc)
+                keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic.topic_name}'! 😺",
+                    reply_markup=reply_markup
+                )
+                overdue_count += 1
+                logger.info(f"OVERDUE_SENT: Sent overdue reminder for topic '{topic.topic_name}' to user {user_id}")
+
+        if overdue_count > 0:
+            logger.info(f"OVERDUE_SUMMARY: Sent {overdue_count} overdue reminders to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"OVERDUE_ERROR: Failed to check overdue for user {user_id}: {str(e)}")
 
 
 def schedule_daily_check(user_id: int, timezone: str):
@@ -1871,73 +1888,97 @@ def schedule_daily_check(user_id: int, timezone: str):
     logger.debug(f"Scheduled daily checks for user {user_id} at 9:00 and reactivation at 19:00 {timezone}")
 
 
+async def create_overdue_reminder(app: Application, user_id: int, topic_name: str, reminder_id: int):
+    """Создает немедленное напоминание для просроченных тем"""
+    try:
+        keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await app.bot.send_message(
+            chat_id=user_id,
+            text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic_name}'! 😺",
+            reply_markup=reply_markup
+        )
+        logger.info(f"OVERDUE_SENT: Sent overdue reminder for topic '{topic_name}' to user {user_id}")
+    except Exception as e:
+        logger.error(f"OVERDUE_ERROR: Failed to send overdue reminder to user {user_id}: {str(e)}")
+
+
 async def init_scheduler(app: Application):
     users = db.get_all_users()
     logger.info(f"Initializing scheduler for {len(users)} users")
 
+    total_scheduled = 0
+    total_skipped = 0
+
     for i, user in enumerate(users, 1):
         logger.info(f"Processing user {i}/{len(users)}: {user.user_id}")
 
-        reminders = db.get_reminders(user.user_id)
-        logger.info(f"User {user.user_id} has {len(reminders)} reminders in database")
+        try:
+            reminders = db.get_reminders(user.user_id)
+            logger.info(f"User {user.user_id} has {len(reminders)} reminders in database")
 
-        tz = pytz.timezone(user.timezone)
-        scheduled_count = 0
-        skipped_count = 0
+            tz = pytz.timezone(user.timezone)
+            scheduled_count = 0
+            skipped_count = 0
 
-        # Добавляем ежедневную проверку неактивных пользователей в 19:00
+            for reminder in reminders:
+                topic = db.get_topic_by_reminder_id(reminder.reminder_id, user.user_id, user.timezone)
+                if topic:
+                    run_date = db._from_utc_naive(reminder.scheduled_time, user.timezone)
+                    if run_date > datetime.now(tz):
+                        scheduler.add_job(
+                            send_reminder,
+                            "date",
+                            run_date=run_date,
+                            args=[app.bot, user.user_id, topic.topic_name, reminder.reminder_id],
+                            id=f"reminder_{reminder.reminder_id}_{user.user_id}",
+                            timezone=tz,
+                            misfire_grace_time=None
+                        )
+                        scheduled_count += 1
+                        logger.debug(f"Scheduled reminder {reminder.reminder_id} for topic '{topic.topic_name}'")
+                    else:
+                        # ЭТО ВАЖНО: для просроченных напоминаний создаем временное
+                        await create_overdue_reminder(app, user.user_id, topic.topic_name, reminder.reminder_id)
+                        skipped_count += 1
+                        logger.info(f"OVERDUE_REMINDER: Creating immediate reminder for topic '{topic.topic_name}'")
+                else:
+                    logger.warning(f"ORPHANED_REMINDER: Reminder {reminder.reminder_id} has no associated topic")
+                    # Удаляем осиротевшие напоминания
+                    db.delete_reminder(reminder.reminder_id)
+
+            schedule_daily_check(user.user_id, user.timezone)
+
+            # ВАЖНО: Проверяем просроченные напоминания для КАЖДОГО пользователя
+            await check_overdue_for_user(app, user.user_id)
+
+            total_scheduled += scheduled_count
+            total_skipped += skipped_count
+
+            logger.info(
+                f"SCHEDULER_STATS: User {user.user_id} - {scheduled_count} reminders scheduled, {skipped_count} overdue handled")
+
+        except Exception as e:
+            logger.error(f"Error processing user {user.user_id}: {str(e)}")
+            # Продолжаем обработку других пользователей даже при ошибке
+            continue
+
+    # ОДНО глобальное задание для реактивации
+    if not scheduler.get_job("global_reactivation_check"):
         scheduler.add_job(
             check_inactive_users,
             'cron',
             hour=19,
             minute=0,
-            timezone="UTC",  # Будет переопределено для каждого пользователя
+            timezone="UTC",
             args=[app],
-            id="reactivation_check"
+            id="global_reactivation_check"
         )
 
-        # Для каждого пользователя создаем отдельное задание в его часовом поясе
-        users = db.get_all_users()
-        for user in users:
-            scheduler.add_job(
-                check_inactive_users,
-                'cron',
-                hour=19,
-                minute=0,
-                timezone=user.timezone,
-                args=[app],
-                id=f"reactivation_{user.user_id}"
-            )
-
-        for reminder in reminders:
-            topic = db.get_topic_by_reminder_id(reminder.reminder_id, user.user_id, user.timezone)
-            if topic:
-                run_date = db._from_utc_naive(reminder.scheduled_time, user.timezone)
-                if run_date > datetime.now(tz):
-                    scheduler.add_job(
-                        send_reminder,
-                        "date",
-                        run_date=run_date,
-                        args=[app.bot, user.user_id, topic.topic_name, reminder.reminder_id],
-                        id=f"reminder_{reminder.reminder_id}_{user.user_id}",
-                        timezone=tz,
-                        misfire_grace_time=None
-                    )
-                    scheduled_count += 1
-                    logger.debug(f"Scheduled reminder {reminder.reminder_id} for topic '{topic.topic_name}'")
-                else:
-                    skipped_count += 1
-                    logger.info(f"REMINDER_SKIPPED: Reminder {reminder.reminder_id} for topic '{topic.topic_name}' is in the past (was: {run_date})")
-            else:
-                logger.warning(f"ORPHANED_REMINDER: Reminder {reminder.reminder_id} has no associated topic")
-
-        schedule_daily_check(user.user_id, user.timezone)
-        await check_overdue_for_user(app, user.user_id)
-
-        logger.info(f"SCHEDULER_STATS: User {user.user_id} - {scheduled_count} reminders scheduled, {skipped_count} skipped (past due)")
-
     total_jobs = len(scheduler.get_jobs())
-    logger.info(f"Scheduler initialization complete. Total jobs: {total_jobs}")
+    logger.info(
+        f"Scheduler initialization complete. Total jobs: {total_jobs}, Total scheduled: {total_scheduled}, Total overdue: {total_skipped}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
