@@ -670,19 +670,21 @@ async def handle_add_topic_category(query, context, parts, user_id, user):
 
     if topic_name:
         try:
+            # ВАЖНО: Должен возвращать (topic_id, reminder_id)
             topic_id, reminder_id = db.add_topic(user_id, topic_name, user.timezone, category_id)
             tz = pytz.timezone(user.timezone)
 
             # Логирование успешного добавления темы
             category_name = db.get_category(category_id, user_id).category_name if category_id else "Без категории"
             logger.info(
-                f"USER_ACTION: User {user_id} added topic '{topic_name}' to category '{category_name}' (topic_id: {topic_id})")
+                f"USER_ACTION: User {user_id} added topic '{topic_name}' to category '{category_name}' (topic_id: {topic_id}, reminder_id: {reminder_id})")
 
             # Получаем время напоминания для логирования
             reminder_time = db._from_utc_naive(db.get_reminder(reminder_id).scheduled_time, user.timezone)
             logger.info(
                 f"REMINDER_SCHEDULED: Topic '{topic_name}' reminder scheduled for {reminder_time.strftime('%Y-%m-%d %H:%M')} (reminder_id: {reminder_id})")
 
+            # Добавляем в планировщик
             scheduler.add_job(
                 send_reminder,
                 "date",
@@ -692,6 +694,7 @@ async def handle_add_topic_category(query, context, parts, user_id, user):
                 timezone=tz,
                 misfire_grace_time=None
             )
+
             await query.message.delete()
             await query.message.reply_text(
                 f"Тема '{topic_name}' добавлена! 😺 Первое повторение через 1 час.",
@@ -1140,8 +1143,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     data = query.data
     user_id = update.effective_user.id
+    username = update.effective_user.username
+    username_display = f"@{username}" if username else f"user_{user_id}"
     db.update_user_activity(user_id)
     user = db.get_user(user_id)
+
+    logger.debug(f"User {user_id} ({username_display}) clicked: {data}")
 
     if not user:
         await query.answer()
@@ -1352,13 +1359,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username
+    username_display = f"@{username}" if username else f"user_{user_id}"
     text = update.message.text.strip()
     user = db.get_user(user_id)
     db.update_user_activity(user_id)
 
     # ДОБАВЬ ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
-    logger.debug(
-        f"User {user_id} sent: '{text}', state: {context.user_data.get('state')}, user exists: {user is not None}")
+    logger.debug(f"User {user_id} ({username_display}) sent: '{text}', state: {context.user_data.get('state')}")
 
     # ВАЖНОЕ ИСПРАВЛЕНИЕ: Если пользователь уже существует и пытается использовать основное меню,
     # но состояние застряло - принудительно сбрасываем состояние для основных команд
@@ -1689,6 +1697,7 @@ async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
     try:
         # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ТЕМЫ ПЕРЕД ОТПРАВКОЙ
         user = db.get_user(user_id)
+        username_display = f"@{user.username}" if user and user.username else f"user_{user_id}"
         if user:
             topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
             if not topic:
@@ -1698,7 +1707,7 @@ async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
         keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
+        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id} ({username_display})")
 
         await bot.send_message(
             chat_id=user_id,
@@ -1797,11 +1806,26 @@ async def check_inactive_users(app: Application):
 
         for days, stage in stages:
             inactive_users = db.get_inactive_users(days)
-            logger.info(f"REACTIVATION: Found {len(inactive_users)} users inactive for {days} days (stage {stage})")
+
+            # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О USERNAME В ЛОГ
+            user_info = []
+            for user_reactivation in inactive_users:
+                user = db.get_user(user_reactivation.user_id)
+                username_display = f"@{user.username}" if user and user.username else f"user_{user_reactivation.user_id}"
+                user_info.append(f"{user_reactivation.user_id} ({username_display})")
+
+            logger.info(
+                f"REACTIVATION: Found {len(inactive_users)} users inactive for {days} days (stage {stage}): {', '.join(user_info)}")
 
             for user_reactivation in inactive_users:
+                # Получаем username для логирования
+                user = db.get_user(user_reactivation.user_id)
+                username_display = f"@{user.username}" if user and user.username else f"user_{user_reactivation.user_id}"
+
                 # Проверяем, не отправляли ли уже сообщение этой стадии
                 if user_reactivation.reactivation_stage < stage:
+                    logger.info(
+                        f"REACTIVATION: Sending stage {stage} message to user {user_reactivation.user_id} ({username_display})")
                     await send_reactivation_message(app.bot, user_reactivation.user_id, stage)
                     # Делаем небольшую паузу между сообщениями
                     await asyncio.sleep(0.5)
@@ -1896,18 +1920,18 @@ async def init_scheduler(app: Application):
     total_overdue = 0
 
     for i, user in enumerate(users, 1):
-        logger.info(f"Processing user {i}/{len(users)}: {user.user_id}")
+        # ДОБАВЛЯЕМ USERNAME В ЛОГ
+        username_display = f"@{user.username}" if user.username else f"user_{user.user_id}"
+        logger.info(f"Processing user {i}/{len(users)}: {user.user_id} ({username_display})")
 
         try:
-            # Получаем активные темы пользователя
             active_topics = db.get_active_topics(user.user_id, user.timezone, category_id='all')
-            logger.info(f"User {user.user_id} has {len(active_topics)} active topics")
+            logger.info(f"User {user.user_id} ({username_display}) has {len(active_topics)} active topics")
 
             tz = pytz.timezone(user.timezone)
             scheduled_count = 0
             overdue_count = 0
 
-            # Для КАЖДОЙ активной темы проверяем статус
             for topic in active_topics:
                 if topic.next_review is None or topic.is_completed:
                     continue
@@ -1921,10 +1945,8 @@ async def init_scheduler(app: Application):
                 if next_review_local < now_local:
                     # Тема просрочена
                     if existing_reminder:
-                        # Используем существующее напоминание
                         reminder_id = existing_reminder.reminder_id
                     else:
-                        # Создаем новое напоминание
                         reminder_id = db.add_reminder(user.user_id, topic.topic_id, datetime.utcnow())
 
                     keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
@@ -1937,18 +1959,15 @@ async def init_scheduler(app: Application):
                     )
                     overdue_count += 1
                     logger.info(
-                        f"OVERDUE_SENT: Sent overdue reminder for topic '{topic.topic_name}' to user {user.user_id}")
+                        f"OVERDUE_SENT: Sent overdue reminder for topic '{topic.topic_name}' to user {user.user_id} ({username_display})")
 
                 else:
                     # Тема не просрочена - планируем напоминание
                     if existing_reminder:
-                        # Обновляем существующее напоминание
                         reminder_id = existing_reminder.reminder_id
                     else:
-                        # Создаем новое напоминание
                         reminder_id = db.add_reminder(user.user_id, topic.topic_id, topic.next_review)
 
-                    # Планируем в scheduler только если дата в будущем
                     scheduler.add_job(
                         send_reminder,
                         "date",
@@ -1960,7 +1979,7 @@ async def init_scheduler(app: Application):
                     )
                     scheduled_count += 1
                     logger.debug(
-                        f"Scheduled reminder {reminder_id} for topic '{topic.topic_name}' at {next_review_local}")
+                        f"Scheduled reminder {reminder_id} for topic '{topic.topic_name}' to user {user.user_id} ({username_display}) at {next_review_local}")
 
             schedule_daily_check(user.user_id, user.timezone)
 
@@ -1968,10 +1987,10 @@ async def init_scheduler(app: Application):
             total_overdue += overdue_count
 
             logger.info(
-                f"SCHEDULER_STATS: User {user.user_id} - {scheduled_count} reminders scheduled, {overdue_count} overdue sent")
+                f"SCHEDULER_STATS: User {user.user_id} ({username_display}) - {scheduled_count} reminders scheduled, {overdue_count} overdue sent")
 
         except Exception as e:
-            logger.error(f"Error processing user {user.user_id}: {str(e)}")
+            logger.error(f"Error processing user {user.user_id} ({username_display}): {str(e)}")
             continue
 
     # Глобальное задание для реактивации
@@ -1998,6 +2017,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text,
             reply_markup=MAIN_KEYBOARD
         )
+
+
+# Временный скрипт для исправления
+def fix_missing_reminders():
+    users = db.get_all_users()
+    for user in users:
+        topics = db.get_active_topics(user.user_id, user.timezone, category_id='all')
+        for topic in topics:
+            existing_reminder = db.get_reminder_by_topic(topic.topic_id)
+            if not existing_reminder:
+                # Создаем недостающее напоминание
+                reminder_id = db.add_reminder(user.user_id, topic.topic_id, topic.next_review)
+                logger.info(f"Created missing reminder {reminder_id} for topic {topic.topic_id}")
 
 
 async def main():

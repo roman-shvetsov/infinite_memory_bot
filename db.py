@@ -209,6 +209,9 @@ class Database:
             next_review_local = now_local + timedelta(hours=1)
             next_review_utc = self._to_utc_naive(next_review_local, timezone)
 
+            logger.info(f"DB_OPERATION: Starting to create topic '{topic_name}' for user {user_id}")
+
+            # Создаем тему
             topic = Topic(
                 user_id=user_id,
                 category_id=category_id,
@@ -221,20 +224,30 @@ class Database:
                 is_completed=False
             )
             session.add(topic)
+            session.flush()  # Получаем topic_id
+            logger.info(f"DB_OPERATION: Topic created with ID {topic.topic_id}")
 
+            # Создаем напоминание
             reminder = Reminder(
                 user_id=user_id,
                 topic_id=topic.topic_id,
                 scheduled_time=next_review_utc
             )
             session.add(reminder)
+            session.flush()  # Получаем reminder_id
+            logger.info(f"DB_OPERATION: Reminder created with ID {reminder.reminder_id}")
 
+            # КОММИТИМ ТРАНЗАКЦИЮ
             session.commit()
+            logger.info(
+                f"DB_OPERATION: Transaction COMMITTED for topic {topic.topic_id}, reminder {reminder.reminder_id}")
+
             return topic.topic_id, reminder.reminder_id
 
         except Exception as e:
+            logger.error(f"DB_OPERATION: ERROR in transaction: {str(e)}")
             session.rollback()
-            logger.error(f"Error adding topic '{topic_name}' for user {user_id}: {str(e)}")
+            logger.error(f"DB_OPERATION: Transaction ROLLED BACK for topic '{topic_name}'")
             raise
         finally:
             session.close()
