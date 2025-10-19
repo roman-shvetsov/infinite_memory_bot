@@ -133,6 +133,28 @@ class Database:
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
+    def cleanup_old_reminders(self, user_id):
+        """Очищает старые напоминания для пользователя"""
+        session = self.Session()
+        try:
+            # Удаляем все напоминания пользователя - они будут создаваться заново
+            deleted_count = session.query(Reminder).filter_by(user_id=user_id).delete()
+            session.commit()
+            logger.info(f"Cleaned up {deleted_count} old reminders for user {user_id}")
+            return deleted_count
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error cleaning up reminders for user {user_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
     def save_user(self, user_id, username, timezone):
         session = self.Session()
         try:
@@ -756,6 +778,7 @@ class Database:
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
     def get_reminder_by_topic(self, topic_id):
+        """Получает напоминание по ID темы"""
         session = self.Session()
         try:
             reminder = session.query(Reminder).filter_by(topic_id=topic_id).first()
