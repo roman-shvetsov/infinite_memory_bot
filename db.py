@@ -121,7 +121,13 @@ class Database:
                 user.username = username
                 user.timezone = timezone
             else:
-                user = User(user_id=user_id, username=username, timezone=timezone)
+                # ДОБАВЛЯЕМ created_at ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ
+                user = User(
+                    user_id=user_id,
+                    username=username,
+                    timezone=timezone,
+                    created_at=datetime.utcnow()  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+                )
                 session.add(user)
             session.commit()
             logger.debug(f"User {user_id} saved with timezone {timezone}")
@@ -253,15 +259,29 @@ class Database:
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
     def get_topic_by_reminder_id(self, reminder_id, user_id, timezone):
+        """Получает тему по ID напоминания"""
         session = self.Session()
         try:
-            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id, user_id=user_id).first()
-            if reminder:
-                topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, user_id=user_id).first()
-                if topic:
-                    topic.next_review = topic.next_review
-                return topic
-            return None
+            # Ищем напоминание
+            reminder = session.query(Reminder).filter_by(reminder_id=reminder_id).first()
+            if not reminder:
+                logger.warning(f"Reminder {reminder_id} not found")
+                return None
+
+            # Ищем тему по topic_id из напоминания
+            topic = session.query(Topic).filter_by(
+                topic_id=reminder.topic_id,
+                user_id=user_id
+            ).first()
+
+            if topic:
+                topic.next_review = topic.next_review  # utc naive
+                logger.debug(f"Found topic {topic.topic_id} for reminder {reminder_id}")
+            else:
+                logger.warning(
+                    f"Topic for reminder {reminder_id} not found (topic_id: {reminder.topic_id}, user_id: {user_id})")
+
+            return topic
         finally:
             session.close()
 

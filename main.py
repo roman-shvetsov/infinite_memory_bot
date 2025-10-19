@@ -590,15 +590,21 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         await query.answer("Ошибка: неверный формат команды")
         return
 
+    # Логируем попытку
+    logger.info(f"USER_ACTION: User {user_id} clicking 'Repeated' for reminder {reminder_id}")
+
     # Единая проверка существования напоминания и темы
     reminder = db.get_reminder(reminder_id)
     if not reminder:
+        logger.warning(f"REMINDER_NOT_FOUND: Reminder {reminder_id} not found")
         await query.answer("Напоминание не найдено. Возможно, тема была удалена. 😿")
         await query.message.delete()
         return
 
     topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
     if not topic:
+        logger.error(
+            f"TOPIC_NOT_FOUND_BY_REMINDER: Reminder {reminder_id} exists but topic not found (topic_id: {reminder.topic_id})")
         await query.answer("Тема не найдена. Возможно, она была удалена. 😿")
         await query.message.delete()
         return
@@ -1678,13 +1684,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# В функции send_reminder добавьте:
 async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
     try:
+        # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ТЕМЫ ПЕРЕД ОТПРАВКОЙ
+        user = db.get_user(user_id)
+        if user:
+            topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+            if not topic:
+                logger.error(f"REMINDER_ERROR: Topic not found for reminder {reminder_id}")
+                return
+
         keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Логирование отправки напоминания
-        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} to user {user_id}")
+        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id}")
 
         await bot.send_message(
             chat_id=user_id,
