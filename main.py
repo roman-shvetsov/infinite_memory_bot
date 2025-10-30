@@ -13,6 +13,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import asyncio
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from telegram.error import TimedOut, NetworkError
 import random
 from kex_messages import REACTIVATION_MESSAGES
 from telegram.error import InvalidToken
@@ -1692,30 +1695,87 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# В функции send_reminder добавьте:
-async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
+@retry(
+    stop=stop_after_attempt(3),  # 3 попытки
+    wait=wait_exponential(multiplier=1, min=2, max=10),  # экспоненциальная задержка
+    retry=retry_if_exception_type((TimedOut, NetworkError)),  # повторяем только при таймаутах и сетевых ошибках
+    reraise=True
+)
+async def send_reminder_with_retry(bot, user_id: int, topic_name: str, reminder_id: int):
+    """Отправляет напоминание с повторными попытками при таймаутах"""
     try:
-        # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ТЕМЫ ПЕРЕД ОТПРАВКОЙ
         user = db.get_user(user_id)
         username_display = f"@{user.username}" if user and user.username else f"user_{user_id}"
-        if user:
-            topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
-            if not topic:
-                logger.error(f"REMINDER_ERROR: Topic not found for reminder {reminder_id}")
-                return
+
+        if not user:
+            logger.error(f"REMINDER_ERROR: User {user_id} not found for reminder {reminder_id}")
+            return
+
+        topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+        if not topic:
+            logger.error(f"REMINDER_ERROR: Topic not found for reminder {reminder_id}")
+            return
 
         keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        logger.info(f"REMINDER_SENT: Sending reminder {reminder_id} for topic '{topic_name}' to user {user_id} ({username_display})")
+        logger.info(
+            f"REMINDER_ATTEMPT: Attempting to send reminder {reminder_id} for topic '{topic_name}' to user {user_id} ({username_display})")
 
         await bot.send_message(
             chat_id=user_id,
             text=f"⏰ Пора повторить тему '{topic_name}'! 😺",
             reply_markup=reply_markup
         )
+
+        logger.info(
+            f"REMINDER_SUCCESS: Successfully sent reminder {reminder_id} for topic '{topic_name}' to user {user_id} ({username_display})")
+
     except Exception as e:
         logger.error(f"REMINDER_ERROR: Failed to send reminder {reminder_id} to user {user_id}: {str(e)}")
+        raise  # Пробрасываем исключение для tenacity
+
+
+async def send_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
+    """Основная функция отправки напоминания с обработкой ошибок и резервным планированием"""
+    try:
+        await send_reminder_with_retry(bot, user_id, topic_name, reminder_id)
+    except Exception as e:
+        logger.error(f"REMINDER_FINAL_ERROR: All retries failed for reminder {reminder_id} to user {user_id}: {str(e)}")
+
+        # Пытаемся перепланировать через 5 минут
+        try:
+            await reschedule_failed_reminder(bot, user_id, topic_name, reminder_id)
+        except Exception as reschedule_error:
+            logger.error(
+                f"REMINDER_RESCHEDULE_CRITICAL: Cannot reschedule reminder {reminder_id}: {str(reschedule_error)}")
+
+
+async def reschedule_failed_reminder(bot, user_id: int, topic_name: str, reminder_id: int):
+    """Перепланирует неудачное напоминание через 5 минут"""
+    try:
+        user = db.get_user(user_id)
+        if not user:
+            return
+
+        tz = pytz.timezone(user.timezone)
+        retry_time = datetime.now(tz) + timedelta(minutes=5)
+
+        scheduler.add_job(
+            send_reminder,
+            "date",
+            run_date=retry_time,
+            args=[bot, user_id, topic_name, reminder_id],
+            id=f"reminder_retry_{reminder_id}_{user_id}",
+            timezone=tz,
+            misfire_grace_time=None
+        )
+
+        logger.info(
+            f"REMINDER_RESCHEDULED: Rescheduled reminder {reminder_id} for topic '{topic_name}' to {retry_time}")
+
+    except Exception as e:
+        logger.error(f"REMINDER_RESCHEDULE_ERROR: Failed to reschedule reminder {reminder_id}: {str(e)}")
 
 
 async def send_reactivation_message(bot, user_id: int, stage: int):
