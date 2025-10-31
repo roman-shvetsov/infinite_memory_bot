@@ -666,10 +666,21 @@ class Database:
         try:
             reminder = session.query(Reminder).filter_by(reminder_id=reminder_id).first()
             if not reminder:
+                logger.warning(f"REMINDER_NOT_FOUND_IN_DB: Reminder {reminder_id} not found in database")
                 return None
+
             topic = session.query(Topic).filter_by(topic_id=reminder.topic_id, is_completed=False).first()
             if not topic:
+                logger.warning(
+                    f"TOPIC_NOT_FOUND_OR_COMPLETED: Topic for reminder {reminder_id} not found or already completed")
                 return None
+
+            # ПРОВЕРЯЕМ, ЧТО ПОЛЬЗОВАТЕЛЬ ИМЕЕТ ДОСТУП К ЭТОЙ ТЕМЕ
+            if topic.user_id != user_id:
+                logger.warning(
+                    f"USER_TOPIC_MISMATCH: User {user_id} tried to access topic {topic.topic_id} owned by {topic.user_id}")
+                return None
+
             tz = pytz.timezone(timezone)
             now_local = datetime.now(tz)
             now_utc = self._to_utc_naive(now_local, timezone)
@@ -678,24 +689,18 @@ class Database:
             topic.repetition_stage = topic.completed_repetitions + 1
 
             intervals = [1, 1, 3, 7, 14, 30, 90]  # days
+
             if topic.completed_repetitions < len(intervals):
                 next_review_local = now_local + timedelta(days=intervals[topic.completed_repetitions])
                 topic.next_review = self._to_utc_naive(next_review_local, timezone)
 
-                # Обновляем существующее напоминание вместо удаления
-                existing_reminder = session.query(Reminder).filter_by(topic_id=topic.topic_id).first()
-                if existing_reminder:
-                    existing_reminder.scheduled_time = topic.next_review
-                    new_reminder_id = existing_reminder.reminder_id
-                else:
-                    new_reminder = Reminder(
-                        user_id=user_id,
-                        topic_id=topic.topic_id,
-                        scheduled_time=topic.next_review
-                    )
-                    session.add(new_reminder)
-                    session.flush()
-                    new_reminder_id = new_reminder.reminder_id
+                # ОБНОВЛЯЕМ СУЩЕСТВУЮЩЕЕ НАПОМИНАНИЕ
+                reminder.scheduled_time = topic.next_review
+                new_reminder_id = reminder.reminder_id
+
+                logger.info(
+                    f"TOPIC_UPDATED: Topic {topic.topic_id} advanced to stage {topic.completed_repetitions}, next review: {next_review_local}")
+
             else:
                 topic.is_completed = True
                 topic.next_review = None
@@ -707,11 +712,15 @@ class Database:
                 )
                 session.add(completed_topic)
                 new_reminder_id = None
+                logger.info(
+                    f"TOPIC_COMPLETED: Topic {topic.topic_id} fully completed with {topic.completed_repetitions} repetitions")
 
             session.commit()
             return topic.completed_repetitions, topic.next_review, new_reminder_id
+
         except Exception as e:
             session.rollback()
+            logger.error(f"DB_ERROR in mark_topic_repeated_by_reminder for reminder {reminder_id}: {str(e)}")
             raise
         finally:
             session.close()

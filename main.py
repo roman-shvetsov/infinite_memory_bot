@@ -167,7 +167,7 @@ os.makedirs("images", exist_ok=True)
 logger.info(f"Images directory: {os.path.abspath('images')}")
 
 # Лимиты для пользователей
-MAX_ACTIVE_TOPICS = 60
+MAX_ACTIVE_TOPICS = 100
 MAX_CATEGORIES = 10
 
 
@@ -593,77 +593,123 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         await query.answer("Ошибка: неверный формат команды")
         return
 
-    # Логируем попытку
-    logger.info(f"USER_ACTION: User {user_id} clicking 'Repeated' for reminder {reminder_id}")
-
-    # Единая проверка существования напоминания и темы
-    reminder = db.get_reminder(reminder_id)
-    if not reminder:
-        logger.warning(f"REMINDER_NOT_FOUND: Reminder {reminder_id} not found")
-        await query.answer("Напоминание не найдено. Возможно, тема была удалена. 😿")
-        await query.message.delete()
+    # ДОБАВЛЯЕМ ПРОВЕРКУ НА ДУБЛИРОВАНИЕ ОБРАБОТКИ
+    processing_key = f"processing_reminder_{reminder_id}"
+    if context.user_data.get(processing_key):
+        logger.warning(f"DUPLICATE_PROCESSING: Reminder {reminder_id} is already being processed for user {user_id}")
+        await query.answer("Повторение уже обрабатывается...")
         return
 
-    topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
-    if not topic:
-        logger.error(
-            f"TOPIC_NOT_FOUND_BY_REMINDER: Reminder {reminder_id} exists but topic not found (topic_id: {reminder.topic_id})")
-        await query.answer("Тема не найдена. Возможно, она была удалена. 😿")
-        await query.message.delete()
-        return
+    context.user_data[processing_key] = True
 
-    topic_name = topic.topic_name
-    logger.info(f"TOPIC_REPEATED: User {user_id} marked topic {topic.topic_id} as repeated via button (reminder_id: {reminder_id})")
-    result = db.mark_topic_repeated_by_reminder(reminder_id, user_id, user.timezone)
+    try:
+        # Логируем попытку
+        logger.info(f"USER_ACTION: User {user_id} clicking 'Repeated' for reminder {reminder_id}")
 
-    if not result:
-        logger.error(f"DB_ERROR: Failed to mark topic {topic.topic_id} as repeated for user {user_id}")
-        await query.answer("Ошибка при отметке повторения. 😔")
-        return
+        # Единая проверка существования напоминания и темы
+        reminder = db.get_reminder(reminder_id)
+        if not reminder:
+            logger.warning(f"REMINDER_NOT_FOUND: Reminder {reminder_id} not found")
+            await query.answer("Напоминание не найдено. Возможно, тема была удалена. 😿")
+            await query.message.delete()
+            return
 
-    completed_repetitions, next_reminder_time, new_reminder_id = result
-    db.update_user_activity(user_id)
-    total_repetitions = 7
-    logger.info(
-        f"TOPIC_PROGRESS: Topic {topic.topic_id} - {completed_repetitions}/{total_repetitions} repetitions completed")
-    progress_percentage = (completed_repetitions / total_repetitions) * 100
-    progress_bar = "█" * completed_repetitions + "░" * (total_repetitions - completed_repetitions)
+        topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
+        if not topic:
+            logger.error(
+                f"TOPIC_NOT_FOUND_BY_REMINDER: Reminder {reminder_id} exists but topic not found (topic_id: {reminder.topic_id})")
+            await query.answer("Тема не найдена. Возможно, она была удалена. 😿")
+            await query.message.delete()
+            return
 
-    tz = pytz.timezone(user.timezone)
-    message = ""
+        # ПРОВЕРЯЕМ, ЧТО ТЕМА ЕЩЕ НЕ ЗАВЕРШЕНА
+        if topic.is_completed:
+            logger.warning(
+                f"TOPIC_ALREADY_COMPLETED: User {user_id} tried to mark completed topic {topic.topic_id} as repeated")
+            await query.answer("Эта тема уже завершена! 🎉")
+            await query.message.delete()
+            return
 
-    if completed_repetitions < total_repetitions:
-        next_reminder_str = db._from_utc_naive(next_reminder_time, user.timezone).strftime("%d.%m.%Y %H:%M")
-        if new_reminder_id:
-            scheduler.add_job(
-                send_reminder,
-                "date",
-                run_date=db._from_utc_naive(next_reminder_time, user.timezone),
-                args=[app.bot, user_id, topic_name, new_reminder_id],
-                id=f"reminder_{new_reminder_id}_{user_id}",
-                timezone=tz,
-                misfire_grace_time=None
+        topic_name = topic.topic_name
+        logger.info(
+            f"TOPIC_REPEATED: User {user_id} marked topic {topic.topic_id} as repeated via button (reminder_id: {reminder_id})")
+
+        # ОТВЕЧАЕМ СРАЗУ, ЧТОБЫ ПОЛЬЗОВАТЕЛЬ ВИДЕЛ РЕАКЦИЮ
+        await query.answer("Обрабатываю повторение...")
+
+        result = db.mark_topic_repeated_by_reminder(reminder_id, user_id, user.timezone)
+
+        if not result:
+            logger.error(f"DB_ERROR: Failed to mark topic {topic.topic_id} as repeated for user {user_id}")
+            await query.answer("Ошибка при отметке повторения. 😔")
+            return
+
+        completed_repetitions, next_reminder_time, new_reminder_id = result
+        db.update_user_activity(user_id)
+        total_repetitions = 7
+        logger.info(
+            f"TOPIC_PROGRESS: Topic {topic.topic_id} - {completed_repetitions}/{total_repetitions} repetitions completed")
+        progress_percentage = (completed_repetitions / total_repetitions) * 100
+        progress_bar = "█" * completed_repetitions + "░" * (total_repetitions - completed_repetitions)
+
+        tz = pytz.timezone(user.timezone)
+        message = ""
+
+        if completed_repetitions < total_repetitions:
+            next_reminder_str = db._from_utc_naive(next_reminder_time, user.timezone).strftime("%d.%m.%Y %H:%M")
+            if new_reminder_id:
+                # УДАЛЯЕМ СТАРОЕ ЗАДАНИЕ ПЕРЕД СОЗДАНИЕМ НОВОГО
+                old_job_id = f"reminder_{reminder_id}_{user_id}"
+                if scheduler.get_job(old_job_id):
+                    scheduler.remove_job(old_job_id)
+                    logger.info(f"REMINDER_CLEANUP: Removed old job {old_job_id}")
+
+                # СОЗДАЕМ НОВОЕ ЗАДАНИЕ С КОРРЕКТНЫМ ID
+                new_job_id = f"reminder_{new_reminder_id}_{user_id}"
+                scheduler.add_job(
+                    send_reminder,
+                    "date",
+                    run_date=db._from_utc_naive(next_reminder_time, user.timezone),
+                    args=[app.bot, user_id, topic_name, new_reminder_id],
+                    id=new_job_id,
+                    timezone=tz,
+                    misfire_grace_time=None
+                )
+                logger.info(f"REMINDER_SCHEDULED: New reminder {new_reminder_id} scheduled for {next_reminder_str}")
+
+            message = (
+                f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
+                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                f"Следующее повторение: {next_reminder_str}\n"
+                f"Прогресс: {progress_bar} {progress_percentage:.1f}%"
             )
-        message = (
-            f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
-            f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-            f"Следующее повторение: {next_reminder_str}\n"
-            f"Прогресс: {progress_bar} {progress_percentage:.1f}%"
-        )
-    else:
-        message = (
-            f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\n"
-            f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-            f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
-            f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺"
-        )
+        else:
+            # УДАЛЯЕМ СТАРОЕ ЗАДАНИЕ ПРИ ЗАВЕРШЕНИИ ТЕМЫ
+            old_job_id = f"reminder_{reminder_id}_{user_id}"
+            if scheduler.get_job(old_job_id):
+                scheduler.remove_job(old_job_id)
+                logger.info(f"REMINDER_CLEANUP: Removed completed topic job {old_job_id}")
 
-    await query.message.delete()
-    await query.message.reply_text(
-        message,
-        reply_markup=MAIN_KEYBOARD
-    )
-    logger.debug(f"User {user_id} marked topic '{topic_name}' as repeated via button")
+            message = (
+                f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\n"
+                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
+                f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
+                f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺"
+            )
+
+        await query.message.delete()
+        await query.message.reply_text(
+            message,
+            reply_markup=MAIN_KEYBOARD
+        )
+        logger.debug(f"User {user_id} marked topic '{topic_name}' as repeated via button")
+
+    except Exception as e:
+        logger.error(f"Error in handle_repeated_callback for reminder {reminder_id}: {str(e)}")
+        await query.answer("Произошла ошибка при обработке. Попробуйте снова.")
+    finally:
+        # ОЧИЩАЕМ ФЛАГ ОБРАБОТКИ
+        context.user_data.pop(processing_key, None)
 
 
 async def handle_add_topic_category(query, context, parts, user_id, user):
