@@ -704,6 +704,7 @@ class Database:
             else:
                 topic.is_completed = True
                 topic.next_review = None
+                # Переносим тему в архив
                 completed_topic = CompletedTopic(
                     user_id=user_id,
                     topic_name=topic.topic_name,
@@ -711,9 +712,11 @@ class Database:
                     completed_at=now_utc
                 )
                 session.add(completed_topic)
+                # УДАЛЯЕМ напоминание — оно больше никогда не понадобится
+                session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
                 new_reminder_id = None
                 logger.info(
-                    f"TOPIC_COMPLETED: Topic {topic.topic_id} fully completed with {topic.completed_repetitions} repetitions")
+                    f"TOPIC_COMPLETED_AND_REMINDER_DELETED: Topic {topic.topic_id} completed and reminder removed from DB")
 
             session.commit()
             return topic.completed_repetitions, topic.next_review, new_reminder_id
