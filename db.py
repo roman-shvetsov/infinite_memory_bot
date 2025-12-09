@@ -27,6 +27,7 @@ class User(Base):
     user_id = Column(Integer, primary_key=True)
     username = Column(String)
     timezone = Column(String)
+    language = Column(String, default='ru')
 
 
 class Topic(Base):
@@ -149,30 +150,32 @@ class Database:
         finally:
             session.close()
 
+    # db.py - обновляем метод save_user
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(3),
         wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
         retry=tenacity.retry_if_exception_type(OperationalError),
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
-    def save_user(self, user_id, username, timezone):
+    def save_user(self, user_id, username, timezone, language='ru'):  # Добавляем language параметр
         session = self.Session()
         try:
             user = session.query(User).filter_by(user_id=user_id).first()
             if user:
                 user.username = username
                 user.timezone = timezone
+                user.language = language  # Обновляем язык
             else:
-                # ДОБАВЛЯЕМ created_at ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ
                 user = User(
                     user_id=user_id,
                     username=username,
                     timezone=timezone,
-                    created_at=datetime.utcnow()  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+                    language=language,  # Сохраняем язык
+                    created_at=datetime.utcnow()
                 )
                 session.add(user)
             session.commit()
-            logger.debug(f"User {user_id} saved with timezone {timezone}")
+            logger.debug(f"User {user_id} saved with timezone {timezone}, language {language}")
         except Exception as e:
             session.rollback()
             logger.error(f"Error saving user {user_id}: {str(e)}")

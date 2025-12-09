@@ -4,6 +4,7 @@ import re
 import signal
 import time
 from typing import Optional
+from translations import get_text, get_main_keyboard, get_kex_message, TRANSLATIONS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,7 +18,6 @@ import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from telegram.error import TimedOut, NetworkError
 import random
-from kex_messages import REACTIVATION_MESSAGES
 from telegram.error import InvalidToken
 from datetime import datetime, timedelta
 import pytz
@@ -238,117 +238,76 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id)
 
     if user:
+        language_name = get_text('russian', user.language) if user.language == 'ru' else get_text('english', user.language)
         await update.message.reply_text(
-            f"С возвращением, {update.effective_user.first_name}! 😺\n"
-            f"Твой текущий часовой пояс: {user.timezone}\n"
-            "Хочешь изменить? Используй /tz\n"
-            "Помощь: /help\n\n"
-            "Помни: регулярные повторения = знания навсегда! 🚀",
-            reply_markup=MAIN_KEYBOARD
+            get_text('welcome_back_extended', user.language,
+                     name=update.effective_user.first_name,
+                     timezone=user.timezone,
+                     language=language_name),
+            reply_markup=get_main_keyboard(user.language)
         )
     else:
-        # СОХРАНЯЕМ ПОЛЬЗОВАТЕЛЯ СРАЗУ ПРИ /start (с временным часовым поясом UTC)
-        db.save_user(user_id, update.effective_user.username or "", "UTC")
+        # Новый пользователь - предлагаем выбрать язык
+        keyboard = [
+            [
+                InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+                InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
+                InlineKeyboardButton("🇪🇸 Español", callback_data="lang:es"),
+            ],
+            [
+                InlineKeyboardButton("🇨🇳 中文", callback_data="lang:zh"),
+                InlineKeyboardButton("🇮🇳 हिन्दी", callback_data="lang:hi"),
+                InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang:de"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            "🚀 *Добро пожаловать в твоего персонального тренера памяти!*\n\n"
-
-            "💡 *Знаешь ли ты что?*\n"
-            "• 90% информации мы забываем за первые 24 часа\n"
-            "• Без повторений знания просто \"испаряются\"\n"
-            "• Можно учить часами и не запомнить ничего\n\n"
-
-            "🎯 *А теперь хорошие новости:*\n"
-            "Есть научный способ запоминать информацию *навсегда*!\n\n"
-
-            "🔬 *Метод интервального повторения:*\n"
-            "Я напоминаю повторить в идеальные моменты:\n"
-            "• Когда ты вот-вот забудешь\n"
-            "• Чтобы закрепить в долговременной памяти\n"
-            "• Без лишних усилий с твоей стороны\n\n"
-
-            "📊 *Всего 7 повторений = знание на годы:*\n"
-            "1 час → 1 день → 3 дня → 1 неделя → 2 недели → 1 месяц → 3 месяца\n\n"
-
-            "✨ *Что это тебе даёт:*\n"
-            "• Запоминаешь в 3 раза эффективнее\n"
-            "• Тратишь всего 5-15 минут в день\n"
-            "• Знания остаются с тобой навсегда\n"
-            "• Учишься без стресса и напряжения\n\n"
-
-            "🎯 *Начни прямо сейчас:*\n"
-            "1. Выбери часовой пояс (чтобы напоминания приходили вовремя)\n"
-            "2. Добавь первую тему\n"
-            "3. Отмечай повторения когда я напоминаю\n"
-            "4. Следи как растёт твоя эрудиция!\n\n"
-
-            "⏰ *Выбери свой часовой пояс:*\n"
-            "Напиши название (например, 'Europe/Moscow') или смещение (например, 'UTC+3')\n"
-            "Или используй /tz для выбора из списка",
-            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True),
+            get_text('welcome_new', 'ru'),  # По умолчанию на русском для выбора языка
+            reply_markup=reply_markup,
             parse_mode="Markdown"
         )
+
+        # Сохраняем пользователя с временными значениями
+        db.save_user(user_id, update.effective_user.username or "", "UTC", "ru")
+        context.user_data["state"] = "awaiting_language"
+
     logger.debug(f"Sent start response to user {update.effective_user.id}")
+
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    current_lang = user.language if user else 'ru'
+
+    keyboard = [
+        [
+            InlineKeyboardButton(f"🇷🇺 Русский {'✅' if current_lang == 'ru' else ''}", callback_data="change_lang:ru"),
+            InlineKeyboardButton(f"🇬🇧 English {'✅' if current_lang == 'en' else ''}", callback_data="change_lang:en")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        get_text('choose_language', current_lang),
+        reply_markup=reply_markup
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.debug(f"Received /help command from user {user_id}")
 
-    help_text = (
-        "🚀 Твой персональный тренер памяти - запоминай навсегда!\n\n"
+    # Получаем язык пользователя
+    user = db.get_user(user_id)
+    language = user.language if user else 'ru'
 
-        "💡 Научный подход к запоминанию:\n"
-        "Наш мозг забывает информацию по определённой кривой (кривая Эббингауза). "
-        "90% информации забывается за первые 24 часа, если её не повторить!\n\n"
-
-        "🎯 Почему именно такая последовательность?\n"
-        "1 час - фиксируем в кратковременной памяти\n"
-        "1 день - переносим в среднесрочную память  \n"
-        "3 дня - усиливаем нейронные связи\n"
-        "1-2 недели - закрепляем в долговременной памяти\n"
-        "1-3 месяца - окончательно фиксируем\n\n"
-
-        "📊 Результат: После 7 повторений информация переходит в долговременную память "
-        "и остаётся с тобой на годы!\n\n"
-
-        "🔬 Это не просто цифры:\n"
-        "Метод интервального повторения научно доказан и используется:\n"
-        "• В обучении врачей и пилотов\n"
-        "• При изучении иностранных языков\n"
-        "• В подготовке к серьёзным экзаменам\n"
-        "• Спортсменами для запоминания тактик\n\n"
-
-        "🎯 Что можно учить:\n"
-        "• Иностранные слова и фразы\n"
-        "• Научные термины и формулы\n"
-        "• Исторические даты и факты\n"
-        "• Код и алгоритмы\n"
-        "• Подготовка к экзаменам\n"
-        "• И всё что угодно!\n\n"
-
-        "🛠 Быстрый старт:\n"
-        "1. Добавь тему - начни с 2-3 тем\n"
-        "2. Отмечай «Повторил!» по напоминаниям\n"
-        "3. Следи за прогрессом - смотри как знания закрепляются\n"
-        "4. Достигай 100% - получай знания навсегда!\n\n"
-
-        "📋 Основные команды:\n"
-        "• Добавить тему - создать новую тему\n"
-        "• Мой прогресс - увидеть прогресс\n"
-        "• Категории - организовать темы\n"
-        "• Восстановить тему - повторить завершённое\n\n"
-
-        "💫 Попробуй всего 1 тему и увидишь как это работает!\n"
-        "Через неделю ты удивишься сколько запомнил без усилий.\n\n"
-
-        "🎉 Готов начать? Нажми «Добавить тему» и убедись сам!\n\n"
-        "❓ Есть вопросы? Пиши: @garage_pineapple"
-    )
+    # Используем get_text для получения текста помощи
+    help_text = get_text('help_text', language)
 
     await update.message.reply_text(
         help_text,
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=get_main_keyboard(language)  # Используем правильную клавиатуру
     )
     logger.debug(f"Sent help response to user {user_id}")
 
@@ -357,9 +316,14 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     context.user_data["state"] = None
     context.user_data.clear()
+
+    # ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ИЗ БАЗЫ
+    user = db.get_user(user_id)
+    language = user.language if user else 'ru'
+
     await update.message.reply_text(
-        "Состояние сброшено! 😺",
-        reply_markup=MAIN_KEYBOARD
+        get_text('reset_state', language),
+        reply_markup=get_main_keyboard(language)  # Используем правильную клавиатуру
     )
     logger.debug(f"User {user_id} reset state")
 
@@ -369,11 +333,14 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.split(maxsplit=1)[1] if len(update.message.text.split()) > 1 else None
     logger.debug(f"User {user_id} sent timezone command: {text}")
 
+    # ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ СРАЗУ
+    user = db.get_user(user_id)
+    language = user.language if user else 'ru'  # Язык по умолчанию
+
     if text == "list":
         await update.message.reply_text(
-            "Полный список часовых поясов: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones\n"
-            "Отправь название (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8').",
-            reply_markup=MAIN_KEYBOARD
+            get_text('timezone_list_info', language),
+            reply_markup=get_main_keyboard(language)  # Используем правильную клавиатуру
         )
         return
 
@@ -382,11 +349,11 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if timezone:
             try:
                 pytz.timezone(timezone)
-                db.save_user(user_id, update.effective_user.username or "", timezone)
+                db.save_user(user_id, update.effective_user.username or "", timezone, language)
                 logger.debug(f"User {user_id} saved with timezone {timezone} (from UTC offset {text})")
                 await update.message.reply_text(
-                    f"Часовой пояс {timezone} (UTC{text}) сохранен! 😺",
-                    reply_markup=MAIN_KEYBOARD
+                    get_text('timezone_saved_with_offset', language, timezone=timezone, offset=text),
+                    reply_markup=get_main_keyboard(language)
                 )
                 schedule_daily_check(user_id, timezone)
                 context.user_data["state"] = None
@@ -395,11 +362,11 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error validating UTC timezone {timezone}: {str(e)}")
         try:
             pytz.timezone(text)
-            db.save_user(user_id, update.effective_user.username or "", text)
+            db.save_user(user_id, update.effective_user.username or "", text, language)
             logger.debug(f"User {user_id} saved with timezone {text}")
             await update.message.reply_text(
-                f"Часовой пояс {text} сохранен! 😺",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_saved_simple', language, timezone=text),
+                reply_markup=get_main_keyboard(language)
             )
             schedule_daily_check(user_id, text)
             context.user_data["state"] = None
@@ -407,8 +374,8 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error saving user timezone: {str(e)}")
             await update.message.reply_text(
-                "Ой, что-то не так с часовым поясом. 😔 Попробуй название (например, 'Europe/Moscow') или смещение (например, 'UTC+8' или '+8').",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_error', language),
+                reply_markup=get_main_keyboard(language)
             )
         return
 
@@ -421,25 +388,25 @@ async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Europe/London (GMT, UTC+0)", callback_data="tz:Europe/London"),
             InlineKeyboardButton("Asia/Tokyo (JST, UTC+9)", callback_data="tz:Asia/Tokyo"),
         ],
-        [InlineKeyboardButton("Другой (введи вручную)", callback_data="tz:manual")],
+        [InlineKeyboardButton(get_text('other_manual_button', language), callback_data="tz:manual")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Выбери часовой пояс или введи его вручную (например, 'Europe/Moscow' или 'UTC+8'):",
+        get_text('choose_timezone', language),
         reply_markup=reply_markup
     )
     context.user_data["state"] = "awaiting_timezone"
     logger.debug(f"User {user_id} prompted to select timezone")
 
 
-async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, language: str = 'ru'):
     user_id = update.effective_user.id
     db.update_user_activity(user_id)
     user = db.get_user(user_id)
     if not user:
         await update.message.reply_text(
-            "Пожалуйста, сначала выбери часовой пояс с помощью /start или /tz.",
-            reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
+            get_text('need_timezone', language),
+            reply_markup=ReplyKeyboardMarkup([[get_text('tz_button', language)]], resize_keyboard=True)
         )
         return
 
@@ -451,11 +418,19 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(category.category_name, callback_data=f"category_progress:{category.category_id}")]
         for category in categories
     ]
-    keyboard.append([InlineKeyboardButton("📁 Без категории", callback_data="category_progress:none")])
+    keyboard.append([InlineKeyboardButton(get_text('no_category', language), callback_data="category_progress:none")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    text = f"📊 Активных тем: {len(all_active_topics)}/{MAX_ACTIVE_TOPICS}\n"
-    text += "Выбери категорию для просмотра прогресса:"
+    # Используем get_text для всего текста
+    text = get_text('active_topics_count', language, current=len(all_active_topics), max=MAX_ACTIVE_TOPICS)
+    if not text:
+        text = f"📊 Активных тем: {len(all_active_topics)}/{MAX_ACTIVE_TOPICS}\n"
+
+    select_text = get_text('select_category_for_progress', language)
+    if not select_text:
+        select_text = "Выбери категорию для просмотра прогресса:"
+
+    text += select_text
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -472,16 +447,17 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: Optional[int],
-                                 timezone: str):
+                                 timezone: str, language: str = 'ru'):
+
     user_id = update.effective_user.id
     logger.debug(f"User {user_id} requested progress for category {category_id}")
     topics = db.get_active_topics(user_id, timezone, category_id=category_id)
     total_repetitions = 7
-    category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+    category_name = db.get_category(category_id, user_id).category_name if category_id else get_text('no_category_with_icon', language)
 
     if not topics:
         reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="back_to_progress")]])
-        text = f"В категории '{category_name}' пока нет тем! 😿"
+        text = get_text('no_topics_in_category_msg', language, category_name=category_name)
 
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -499,18 +475,19 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
     tz = pytz.timezone(timezone)
     now_utc = datetime.utcnow()
     now_local = pytz.utc.localize(now_utc).astimezone(tz)
-    message = f"📚 {category_name} ({timezone}) 😺\n\n"
+    message = get_text('progress_header', language, category_name=category_name, timezone=timezone)
 
     for topic in topics:
         next_review_local = db._from_utc_naive(topic.next_review, timezone) if topic.next_review else None
         progress_percentage = (topic.completed_repetitions / total_repetitions) * 100
         progress_bar = "█" * int(topic.completed_repetitions) + "░" * (total_repetitions - topic.completed_repetitions)
         if topic.is_completed:
-            status = "Завершено"
+            status = get_text('status_completed', language)
         elif next_review_local:
-            status = next_review_local.strftime('%d.%m.%Y %H:%M') if next_review_local > now_local else "Просрочено"
+            status = next_review_local.strftime('%d.%m.%Y %H:%M') if next_review_local > now_local else get_text(
+                'status_overdue', language)
         else:
-            status = "Завершено"
+            status = get_text('status_completed', language)
         message += (
             f"📖 {topic.topic_name}\n"
             f"⏰ Следующее: {status}\n"
@@ -518,7 +495,7 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
             f"──────────\n"
         )
 
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="back_to_progress")]])
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(get_text('back', language), callback_data="back_to_progress")]])
     try:
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -533,7 +510,7 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
             )
     except Exception as e:
         logger.error(f"Error sending category progress for user {user_id}, category {category_id}: {str(e)}")
-        error_message = "Ой, что-то пошло не так при отображении прогресса! 😿 Попробуй снова или используй /reset."
+        error_message = get_text('progress_error', language)
         if update.callback_query:
             await update.callback_query.edit_message_text(
                 error_message,
@@ -549,49 +526,94 @@ async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_timezone_callback(query, context, parts, user_id):
     timezone = parts[1] if len(parts) > 1 else None
+    user = db.get_user(user_id)
+    language = user.language if user else 'ru'
+
     if timezone == "manual":
-        # Устанавливаем состояние ДО отправки сообщения
         context.user_data["state"] = "awaiting_manual_timezone"
         await query.message.reply_text(
-            "⌨️ Введи часовой пояс вручную:\n\n"
-            "• Название: Europe/Moscow, Asia/Tokyo, America/New_York\n"
-            "• Смещение: +3, UTC+3, -5, UTC-5\n"
-            "• Или используй /tz list для полного списка"
+            get_text('enter_timezone_manual', language)
         )
-        logger.debug(f"User {user_id} set state to: awaiting_manual_timezone")
     else:
         try:
-            # ОБНОВЛЯЕМ часовой пояс пользователя (он уже сохранен при /start)
-            db.save_user(user_id, query.from_user.username or "", timezone)
+            db.save_user(user_id, query.from_user.username or "", timezone, language)
             schedule_daily_check(user_id, timezone)
-
-            # Обновляем активность
             db.update_user_activity(user_id)
-
-            # Сбрасываем состояние
             context.user_data["state"] = None
             context.user_data.clear()
 
             await query.message.reply_text(
-                f"Часовой пояс {timezone} сохранен! 😺",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_set', language, timezone=timezone),
+                reply_markup=get_main_keyboard(language)
             )
-            logger.info(f"User {user_id} updated timezone to {timezone}")
         except Exception as e:
             logger.error(f"Error saving timezone for user {user_id}: {str(e)}")
             await query.message.reply_text(
-                "Ой, что-то пошло не так при сохранении часового пояса. 😔 Попробуй снова!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_error', language),
+                reply_markup=get_main_keyboard(language)
             )
 
     await query.answer()
 
 
-async def handle_repeated_callback(query, context, parts, user_id, user):
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для смены языка"""
+    user_id = update.effective_user.id
+    text = update.message.text.split(maxsplit=1)[1] if len(update.message.text.split()) > 1 else None
+    logger.debug(f"User {user_id} sent language command: {text}")
+
+    user = db.get_user(user_id)
+    current_lang = user.language if user else 'ru'
+
+    # Если указан язык напрямую в команде
+    if text:
+        if text.lower() in ["русский", "russian", "ru"]:
+            new_lang = 'ru'
+        elif text.lower() in ["английский", "english", "en"]:
+            new_lang = 'en'
+        else:
+            # Неправильный язык - показываем выбор
+            await update.message.reply_text(
+                get_text('language_invalid', current_lang),
+                reply_markup=get_main_keyboard(current_lang)
+            )
+            return
+
+        # Меняем язык
+        if user:
+            db.save_user(user_id, user.username or "", user.timezone, new_lang)
+            await update.message.reply_text(
+                get_text('language_set', new_lang),
+                reply_markup=get_main_keyboard(new_lang)
+            )
+            logger.info(f"User {user_id} changed language to {new_lang} via command")
+        return
+
+    # Показываем выбор языка
+    keyboard = [
+        [
+            InlineKeyboardButton(f"🇷🇺 Русский {'✅' if current_lang == 'ru' else ''}", callback_data="change_lang:ru"),
+            InlineKeyboardButton(f"🇬🇧 English {'✅' if current_lang == 'en' else ''}", callback_data="change_lang:en")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        get_text('choose_language', current_lang),
+        reply_markup=reply_markup
+    )
+    context.user_data["state"] = "awaiting_language_change"
+
+
+async def handle_repeated_callback(query, context, parts, user_id, user, language: str = 'ru'):
     reminder_id = int(parts[1]) if len(parts) > 1 else None
     if not reminder_id:
         await query.answer("Ошибка: неверный формат команды")
         return
+
+    # Если language не передан, берем из пользователя
+    if not language:
+        language = user.language if user else 'ru'
 
     # ДОБАВЛЯЕМ ПРОВЕРКУ НА ДУБЛИРОВАНИЕ ОБРАБОТКИ
     processing_key = f"processing_reminder_{reminder_id}"
@@ -610,7 +632,7 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         reminder = db.get_reminder(reminder_id)
         if not reminder:
             logger.warning(f"REMINDER_NOT_FOUND: Reminder {reminder_id} not found")
-            await query.answer("Напоминание не найдено. Возможно, тема была удалена. 😿")
+            await query.answer(get_text('reminder_not_found', language))
             await query.message.delete()
             return
 
@@ -618,7 +640,7 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         if not topic:
             logger.error(
                 f"TOPIC_NOT_FOUND_BY_REMINDER: Reminder {reminder_id} exists but topic not found (topic_id: {reminder.topic_id})")
-            await query.answer("Тема не найдена. Возможно, она была удалена. 😿")
+            await query.answer(get_text('topic_not_found_by_reminder', language))
             await query.message.delete()
             return
 
@@ -626,7 +648,7 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
         if topic.is_completed:
             logger.warning(
                 f"TOPIC_ALREADY_COMPLETED: User {user_id} tried to mark completed topic {topic.topic_id} as repeated")
-            await query.answer("Эта тема уже завершена! 🎉")
+            await query.answer(get_text('topic_already_completed', language))
             await query.message.delete()
             return
 
@@ -635,7 +657,7 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
             f"TOPIC_REPEATED: User {user_id} marked topic {topic.topic_id} as repeated via button (reminder_id: {reminder_id})")
 
         # ОТВЕЧАЕМ СРАЗУ, ЧТОБЫ ПОЛЬЗОВАТЕЛЬ ВИДЕЛ РЕАКЦИЮ
-        await query.answer("Обрабатываю повторение...")
+        await query.answer(get_text('processing_repetition', language))
 
         result = db.mark_topic_repeated_by_reminder(reminder_id, user_id, user.timezone)
 
@@ -677,12 +699,15 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
                 )
                 logger.info(f"REMINDER_SCHEDULED: New reminder {new_reminder_id} scheduled for {next_reminder_str}")
 
-            message = (
-                f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
-                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                f"Следующее повторение: {next_reminder_str}\n"
-                f"Прогресс: {progress_bar} {progress_percentage:.1f}%"
-            )
+            message = get_text('topic_repeated_with_next', language,
+                               topic_name=topic_name,
+                               completed=completed_repetitions,
+                               total=total_repetitions,
+                               next_time=next_reminder_str,
+                               progress_bar=progress_bar,
+                               percentage=progress_percentage)
+            if not message:
+                message = f"Тема '{topic_name}' отмечена как повторённая! 😺\nЗавершено: {completed_repetitions}/{total_repetitions} повторений\nСледующее повторение: {next_reminder_str}\nПрогресс: {progress_bar} {progress_percentage:.1f}%"
         else:
             # УДАЛЯЕМ СТАРОЕ ЗАДАНИЕ ПРИ ЗАВЕРШЕНИИ ТЕМЫ
             old_job_id = f"reminder_{reminder_id}_{user_id}"
@@ -690,17 +715,19 @@ async def handle_repeated_callback(query, context, parts, user_id, user):
                 scheduler.remove_job(old_job_id)
                 logger.info(f"REMINDER_CLEANUP: Removed completed topic job {old_job_id}")
 
-            message = (
-                f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\n"
-                f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
-                f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺"
-            )
+            message = get_text('topic_completed', language,
+                               topic_name=topic_name,
+                               completed=completed_repetitions,
+                               total=total_repetitions,
+                               progress_bar=progress_bar,
+                               percentage=progress_percentage)
+            if not message:
+                message = f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\nЗавершено: {completed_repetitions}/{total_repetitions} повторений\nПрогресс: {progress_bar} {progress_percentage:.1f}%\nЕсли захочешь повторить её заново, используй 'Восстановить тему'. 😺"
 
         await query.message.delete()
         await query.message.reply_text(
             message,
-            reply_markup=MAIN_KEYBOARD
+            reply_markup=get_main_keyboard(language)  # Используем правильную клавиатуру
         )
         logger.debug(f"User {user_id} marked topic '{topic_name}' as repeated via button")
 
@@ -1077,18 +1104,18 @@ async def handle_add_to_category_topic(query, context, parts, user_id):
     context.user_data.pop("move_to_category_id", None)
 
 
-async def show_delete_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
+async def show_delete_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, language: str = 'ru'):
     # Получаем пользователя внутри функции
     user = db.get_user(user_id)
     if not user:
-        await update.message.reply_text("Пользователь не найден")
+        await update.message.reply_text(get_text('user_not_found', language))
         return
 
     categories = db.get_categories(user_id)
     keyboard = []
 
     for category in categories:
-        topics_in_category = db.get_active_topics(user_id, user.timezone, category.category_id)  # Теперь user доступен
+        topics_in_category = db.get_active_topics(user_id, user.timezone, category.category_id)
         if topics_in_category:
             keyboard.append([
                 InlineKeyboardButton(
@@ -1097,39 +1124,43 @@ async def show_delete_categories(update: Update, context: ContextTypes.DEFAULT_T
                 )
             ])
 
-    topics_no_category = db.get_active_topics(user_id, user.timezone, category_id=None)  # Теперь user доступен
+    topics_no_category = db.get_active_topics(user_id, user.timezone, category_id=None)
     if topics_no_category:
         keyboard.append([
             InlineKeyboardButton(
-                f"📁 Без категории ({len(topics_no_category)})",
+                f"{get_text('no_category_icon', language, default='📁')} {get_text('no_category', language)} ({len(topics_no_category)})",
                 callback_data="delete_category_select:none"
             )
         ])
 
     keyboard.append([
-        InlineKeyboardButton("🔍 Все темы сразу", callback_data="delete_all_topics")
+        InlineKeyboardButton(get_text('all_topics_at_once', language, default="🔍 Все темы сразу"),
+                             callback_data="delete_all_topics")
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Используем get_text для получения переведенного текста
+    message_text = get_text('select_category_to_delete', language)
+
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            "Выбери категорию для удаления тем:",
+            message_text,
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
-            "Выбери категорию для удаления тем:",
+            message_text,
             reply_markup=reply_markup
         )
     context.user_data["state"] = "awaiting_delete_category"
 
 
-async def show_restore_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
-    # Получаем пользователя внутри функции (хотя для completed_topics timezone может и не нужен)
+async def show_restore_categories(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, language: str = 'ru'):
+    # Получаем пользователя внутри функции
     user = db.get_user(user_id)
     if not user:
-        await update.message.reply_text("Пользователь не найден")
+        await update.message.reply_text(get_text('user_not_found', language))
         return
 
     completed_topics = db.get_completed_topics(user_id)
@@ -1164,25 +1195,28 @@ async def show_restore_categories(update: Update, context: ContextTypes.DEFAULT_
     if no_category_topics:
         keyboard.append([
             InlineKeyboardButton(
-                f"📁 Без категории ({len(no_category_topics)})",
+                f"{get_text('no_category_icon', language)} {get_text('no_category', language)} ({len(no_category_topics)})",
                 callback_data="restore_category_select:none"
             )
         ])
 
     keyboard.append([
-        InlineKeyboardButton("🔍 Все темы сразу", callback_data="restore_all_topics")
+        InlineKeyboardButton(get_text('all_topics_at_once', language), callback_data="restore_all_topics")
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Используем get_text
+    message_text = get_text('select_category_to_restore', language)
+
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            "Выбери категорию для восстановления тем:",
+            message_text,
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
-            "Выбери категорию для восстановления тем:",
+            message_text,
             reply_markup=reply_markup
         )
     context.user_data["state"] = "awaiting_restore_category"
@@ -1203,21 +1237,159 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer()
         return
 
+    # Получаем язык пользователя
+    language = user.language if user else 'ru'
+
     # Разбиваем data на части для удобства
     parts = data.split(':')
     action = parts[0]
 
     try:
+        # ОБРАБОТКА ВЫБОРА ЯЗЫКА
+        if action == "lang":
+            language = parts[1] if len(parts) > 1 else 'ru'
+
+            # Обновляем язык пользователя
+            user = db.get_user(user_id)
+            if user:
+                db.save_user(user_id, user.username or "", user.timezone or "UTC", language)
+                language = language  # Обновляем локальную переменную
+
+            # Переходим к выбору часового пояса
+            keyboard = [
+                [
+                    InlineKeyboardButton("Europe/Moscow (MSK, UTC+3)", callback_data="tz:Europe/Moscow"),
+                    InlineKeyboardButton("America/New_York (EST, UTC-5)", callback_data="tz:America/New_York"),
+                ],
+                [
+                    InlineKeyboardButton("Europe/London (GMT, UTC+0)", callback_data="tz:Europe/London"),
+                    InlineKeyboardButton("Asia/Tokyo (JST, UTC+9)", callback_data="tz:Asia/Tokyo"),
+                ],
+                [InlineKeyboardButton(
+                    get_text('other_manual', language) if 'other_manual' in TRANSLATIONS.get(language, {})
+                    else ("Другой (введи вручную)" if language == 'ru' else "Other (enter manually)"),
+                    callback_data="tz:manual")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.message.edit_text(
+                get_text('choose_timezone', language),
+                reply_markup=reply_markup
+            )
+            context.user_data["state"] = "awaiting_timezone"
+            await query.answer()
+            return
+
+        # ОБРАБОТКА СМЕНЫ ЯЗЫКА (команда /language)
+        if action == "change_lang":
+            language = parts[1] if len(parts) > 1 else 'ru'
+
+            if user:
+                db.save_user(user_id, user.username or "", user.timezone, language)
+                await query.message.edit_text(
+                    get_text('language_set', language)
+                )
+                await query.message.reply_text(
+                    get_text('welcome_back', language,
+                             name=query.from_user.first_name,
+                             timezone=user.timezone),
+                    reply_markup=get_main_keyboard(language)
+                )
+            await query.answer()
+            return
+
+        # ОБРАБОТКА ЧАСОВОГО ПОЯСА
         if action == "tz":
-            await handle_timezone_callback(query, context, parts, user_id)
+            timezone = parts[1] if len(parts) > 1 else None
+
+            if timezone == "manual":
+                context.user_data["state"] = "awaiting_manual_timezone"
+                await query.message.reply_text(
+                    "⌨️ " + get_text('enter_timezone_manual', language) if 'enter_timezone_manual' in TRANSLATIONS.get(
+                        language, {})
+                    else "Введи часовой пояс вручную:\n\n• Название: Europe/Moscow, Asia/Tokyo, America/New_York\n• Смещение: +3, UTC+3, -5, UTC-5"
+                )
+                logger.debug(f"User {user_id} set state to: awaiting_manual_timezone")
+            else:
+                try:
+                    # ОБНОВЛЯЕМ часовой пояс пользователя
+                    db.save_user(user_id, query.from_user.username or "", timezone, language)
+                    schedule_daily_check(user_id, timezone)
+
+                    # Обновляем активность
+                    db.update_user_activity(user_id)
+
+                    # Сбрасываем состояние
+                    context.user_data["state"] = None
+                    context.user_data.clear()
+
+                    await query.message.reply_text(
+                        get_text('timezone_set', language, timezone=timezone),
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    logger.info(f"User {user_id} updated timezone to {timezone}")
+                except Exception as e:
+                    logger.error(f"Error saving timezone for user {user_id}: {str(e)}")
+                    await query.message.reply_text(
+                        get_text('timezone_error', language),
+                        reply_markup=get_main_keyboard(language)
+                    )
+
+            await query.answer()
+            return
 
         elif action == "category_progress":
             category_id_str = parts[1] if len(parts) > 1 else None
             category_id = int(category_id_str) if category_id_str and category_id_str != "none" else None
-            await show_category_progress(update, context, category_id, user.timezone)
+            await show_category_progress(update, context, category_id, user.timezone, language)
 
         elif action == "add_topic_category":
-            await handle_add_topic_category(query, context, parts, user_id, user)
+            category_id_str = parts[1] if len(parts) > 1 else None
+            category_id = int(category_id_str) if category_id_str and category_id_str != "none" else None
+            topic_name = context.user_data.get("new_topic_name")
+
+            if topic_name:
+                try:
+                    topic_id, reminder_id = db.add_topic(user_id, topic_name, user.timezone, category_id)
+                    tz = pytz.timezone(user.timezone)
+
+                    # Логирование успешного добавления темы
+                    category_name = db.get_category(category_id, user_id).category_name if category_id else get_text(
+                        'no_category', language, default="Без категории")
+                    logger.info(
+                        f"USER_ACTION: User {user_id} added topic '{topic_name}' to category '{category_name}' (topic_id: {topic_id}, reminder_id: {reminder_id})")
+
+                    # Получаем время напоминания для логирования
+                    reminder_time = db._from_utc_naive(db.get_reminder(reminder_id).scheduled_time, user.timezone)
+                    logger.info(
+                        f"REMINDER_SCHEDULED: Topic '{topic_name}' reminder scheduled for {reminder_time.strftime('%Y-%m-%d %H:%M')} (reminder_id: {reminder_id})")
+
+                    # Добавляем в планировщик
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=reminder_time,
+                        args=[app.bot, user_id, topic_name, reminder_id],
+                        id=f"reminder_{reminder_id}_{user_id}",
+                        timezone=tz,
+                        misfire_grace_time=None
+                    )
+
+                    await query.message.delete()
+                    await query.message.reply_text(
+                        f"✅ {get_text('topic_added', language, topic_name=topic_name) if 'topic_added' in TRANSLATIONS.get(language, {}) else f'Тема {topic_name} добавлена!'} 😺",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                except Exception as e:
+                    logger.error(f"Error adding topic '{topic_name}' for user {user_id}: {str(e)}")
+                    await query.message.delete()
+                    await query.message.reply_text(
+                        get_text('error_occurred', language),
+                        reply_markup=get_main_keyboard(language)
+                    )
+
+            context.user_data["state"] = None
+            context.user_data.pop("new_topic_name", None)
 
         elif action == "delete_category_select":
             category_id_str = parts[1] if len(parts) > 1 else None
@@ -1225,13 +1397,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
             topics = db.get_active_topics(user_id, user.timezone, category_id=category_id)
             if not topics:
-                await query.answer("В этой категории нет тем для удаления! 😿")
+                await query.answer(
+                    get_text('no_topics_in_category', language, default="В этой категории нет тем для удаления! 😿"))
                 return
 
             keyboard = []
             for topic in topics:
                 category_name = db.get_category(topic.category_id,
-                                                user_id).category_name if topic.category_id else "📁 Без категории"
+                                                user_id).category_name if topic.category_id else get_text('no_category',
+                                                                                                          language,
+                                                                                                          default="📁 Без категории")
                 keyboard.append([
                     InlineKeyboardButton(
                         f"{topic.topic_name} ({category_name})",
@@ -1239,18 +1414,73 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     )
                 ])
 
-            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+            keyboard.append(
+                [InlineKeyboardButton(get_text('back', language), callback_data="back_to_delete_categories")])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+            category_name = db.get_category(category_id, user_id).category_name if category_id else get_text(
+                'no_category', language, default="📁 Без категории")
             await query.message.edit_text(
-                f"Выбери тему для удаления из категории '{category_name}':",
+                get_text('select_topic_to_delete', language,
+                         category_name=category_name) if 'select_topic_to_delete' in TRANSLATIONS.get(language, {})
+                else f"Выбери тему для удаления из категории '{category_name}':",
                 reply_markup=reply_markup
             )
             context.user_data["state"] = "awaiting_topic_deletion"
 
         elif action == "delete":
-            await handle_delete_topic(query, context, parts, user_id)
+            topic_id = int(parts[1]) if len(parts) > 1 else None
+
+            # Сначала получаем тему для логирования
+            user = db.get_user(user_id)
+            topic = db.get_topic(topic_id, user_id, user.timezone if user else "UTC")
+            topic_name = topic.topic_name if topic else "Unknown"
+
+            # Сначала получаем все напоминания ДО удаления темы
+            reminders = db.get_reminders_by_topic(topic_id)
+
+            # Логирование попытки удаления
+            logger.info(f"USER_ACTION: User {user_id} attempting to delete topic '{topic_name}' (topic_id: {topic_id})")
+
+            if db.delete_topic(topic_id, user_id):
+                # Логирование успешного удаления темы
+                logger.info(
+                    f"TOPIC_DELETED: User {user_id} successfully deleted topic '{topic_name}' (topic_id: {topic_id})")
+                logger.info(f"REMINDER_CLEANUP: Removing {len(reminders)} reminders for deleted topic '{topic_name}'")
+
+                # Удаляем все напоминания этой темы из планировщика
+                removed_jobs_count = 0
+                for reminder in reminders:
+                    job_id = f"reminder_{reminder.reminder_id}_{user_id}"
+                    job = scheduler.get_job(job_id)
+                    if job:
+                        job.remove()
+                        removed_jobs_count += 1
+                        logger.info(f"REMINDER_REMOVED: Removed scheduled job {job_id} for topic '{topic_name}'")
+                    else:
+                        logger.debug(
+                            f"REMINDER_NOT_FOUND: Job {job_id} not found in scheduler (maybe already executed)")
+
+                logger.info(
+                    f"REMINDER_CLEANUP_COMPLETE: Removed {removed_jobs_count} scheduled jobs for topic '{topic_name}'")
+
+                await query.message.delete()
+                await query.message.reply_text(
+                    get_text('topic_deleted', language) if 'topic_deleted' in TRANSLATIONS.get(language, {})
+                    else "Тема и все связанные напоминания удалены! 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+                logger.debug(f"User {user_id} deleted topic {topic_id} with all reminders")
+            else:
+                # Логирование неудачной попытки удаления
+                logger.warning(f"TOPIC_DELETE_FAILED: Topic {topic_id} not found for user {user_id}")
+                await query.message.delete()
+                await query.message.reply_text(
+                    get_text('topic_not_found', language) if 'topic_not_found' in TRANSLATIONS.get(language, {})
+                    else "Тема не найдена. 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+            context.user_data["state"] = None
 
         elif action == "restore_category_select":
             category_id_str = parts[1] if len(parts) > 1 else None
@@ -1263,13 +1493,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 filtered_topics = [t for t in completed_topics if t.category_id is None]
 
             if not filtered_topics:
-                await query.answer("В этой категории нет завершённых тем! 😿")
+                await query.answer(
+                    get_text('no_completed_topics', language, default="В этой категории нет завершённых тем! 😿"))
                 return
 
             keyboard = []
             for topic in filtered_topics:
                 category_name = db.get_category(topic.category_id,
-                                                user_id).category_name if topic.category_id else "📁 Без категории"
+                                                user_id).category_name if topic.category_id else get_text('no_category',
+                                                                                                          language,
+                                                                                                          default="📁 Без категории")
                 keyboard.append([
                     InlineKeyboardButton(
                         f"{topic.topic_name} ({category_name})",
@@ -1277,63 +1510,335 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     )
                 ])
 
-            keyboard.append([InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+            keyboard.append(
+                [InlineKeyboardButton(get_text('back', language), callback_data="back_to_restore_categories")])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            category_name = db.get_category(category_id, user_id).category_name if category_id else "📁 Без категории"
+            category_name = db.get_category(category_id, user_id).category_name if category_id else get_text(
+                'no_category', language, default="📁 Без категории")
             await query.message.edit_text(
-                f"Выбери тему для восстановления из категории '{category_name}':",
+                get_text('select_topic_to_restore', language,
+                         category_name=category_name) if 'select_topic_to_restore' in TRANSLATIONS.get(language, {})
+                else f"Выбери тему для восстановления из категории '{category_name}':",
                 reply_markup=reply_markup
             )
             context.user_data["state"] = "awaiting_topic_restoration"
 
         elif action == "restore":
-            await handle_restore_topic(query, context, parts, user_id, user)
+            completed_topic_id = int(parts[1]) if len(parts) > 1 else None
+            result = db.restore_topic(completed_topic_id, user_id, user.timezone)
+
+            if result:
+                topic_id, topic_name = result
+                reminder = db.get_reminder_by_topic(topic_id)
+                if reminder:
+                    reminder_id = reminder.reminder_id
+                    tz = pytz.timezone(user.timezone)
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=db._from_utc_naive(db.get_reminder(reminder_id).scheduled_time, user.timezone),
+                        args=[app.bot, user_id, topic_name, reminder_id],
+                        id=f"reminder_{reminder_id}_{user_id}",
+                        timezone=tz,
+                        misfire_grace_time=None
+                    )
+                await query.message.delete()
+                await query.message.reply_text(
+                    f"✅ {get_text('topic_restored', language, topic_name=topic_name) if 'topic_restored' in TRANSLATIONS.get(language, {}) else f'Тема {topic_name} восстановлена!'} 😺",
+                    reply_markup=get_main_keyboard(language)
+                )
+                logger.debug(f"User {user_id} restored topic {topic_name}")
+            else:
+                await query.message.delete()
+                await query.message.reply_text(
+                    get_text('topic_not_found', language) if 'topic_not_found' in TRANSLATIONS.get(language, {})
+                    else "Тема не найдена. 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+            context.user_data["state"] = None
 
         elif action == "category_action":
-            await handle_category_action(query, context, parts, user_id)
+            action_type = parts[1] if len(parts) > 1 else None
+
+            if action_type == "create":
+                # ПРОВЕРКА ЛИМИТА СРАЗУ ПРИ ВЫБОРЕ "СОЗДАТЬ КАТЕГОРИЮ"
+                categories = db.get_categories(user_id)
+                if len(categories) >= MAX_CATEGORIES:
+                    await query.message.reply_text(
+                        get_text('category_limit_reached', language, max_categories=MAX_CATEGORIES,
+                                 current_count=len(categories))
+                        if 'category_limit_reached' in TRANSLATIONS.get(language, {})
+                        else f"❌ Достигнут лимит категорий ({MAX_CATEGORIES})! 😿\n\nЧтобы создать новую категорию, сначала удали одну из существующих.\nСейчас у тебя {len(categories)} категорий.",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    logger.info(
+                        f"LIMIT_REACHED: User {user_id} reached category limit ({len(categories)}/{MAX_CATEGORIES})")
+                    context.user_data["state"] = None
+                    return
+
+                context.user_data["state"] = "awaiting_category_name"
+                await query.message.reply_text(
+                    get_text('enter_category_name', language) if 'enter_category_name' in TRANSLATIONS.get(language, {})
+                    else "Напиши название новой категории! 😊",
+                    reply_markup=ReplyKeyboardMarkup([[get_text('cancel', language)]], resize_keyboard=True)
+                )
+
+                logger.info(
+                    f"USER_ACTION: User {user_id} starting to create new category ({len(categories)}/{MAX_CATEGORIES})")
+            elif action_type == "rename":
+                categories = db.get_categories(user_id)
+                if not categories:
+                    await query.message.reply_text(
+                        get_text('no_categories_to_rename', language) if 'no_categories_to_rename' in TRANSLATIONS.get(
+                            language, {})
+                        else "У тебя нет категорий для переименования! 😿",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    context.user_data["state"] = None
+                    return
+
+                keyboard = [
+                    [InlineKeyboardButton(category.category_name,
+                                          callback_data=f"rename_category:{category.category_id}")]
+                    for category in categories
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    get_text('select_category_to_rename', language) if 'select_category_to_rename' in TRANSLATIONS.get(
+                        language, {})
+                    else "Выбери категорию для переименования:",
+                    reply_markup=reply_markup
+                )
+                context.user_data["state"] = "awaiting_category_rename"
+
+            elif action_type == "delete":
+                categories = db.get_categories(user_id)
+                if not categories:
+                    await query.message.reply_text(
+                        get_text('no_categories_to_delete', language) if 'no_categories_to_delete' in TRANSLATIONS.get(
+                            language, {})
+                        else "У тебя нет категорий для удаления! 😿",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    context.user_data["state"] = None
+                    return
+
+                keyboard = [
+                    [InlineKeyboardButton(category.category_name,
+                                          callback_data=f"delete_category:{category.category_id}")]
+                    for category in categories
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    get_text('select_category_to_delete', language) if 'select_category_to_delete' in TRANSLATIONS.get(
+                        language, {})
+                    else "Выбери категорию для удаления (темы перейдут в 'Без категории'):",
+                    reply_markup=reply_markup
+                )
+                context.user_data["state"] = "awaiting_category_deletion"
+
+            elif action_type == "move":
+                topics = db.get_active_topics(user_id, user.timezone, category_id='all')
+                if not topics:
+                    await query.message.reply_text(
+                        get_text('no_topics_to_move', language) if 'no_topics_to_move' in TRANSLATIONS.get(language, {})
+                        else "У тебя нет тем для перемещения! 😿",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    context.user_data["state"] = None
+                    return
+
+                keyboard = [
+                    [InlineKeyboardButton(topic.topic_name, callback_data=f"move_topic:{topic.topic_id}")]
+                    for topic in topics
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    get_text('select_topic_to_move', language) if 'select_topic_to_move' in TRANSLATIONS.get(language,
+                                                                                                             {})
+                    else "Выбери тему для перемещения:",
+                    reply_markup=reply_markup
+                )
+                context.user_data["state"] = "awaiting_topic_selection_move"
 
         elif action == "rename_category":
-            await handle_rename_category(query, context, parts, user_id)
+            category_id = int(parts[1]) if len(parts) > 1 else None
+            context.user_data["rename_category_id"] = category_id
+            context.user_data["state"] = "awaiting_new_category_name"
+            await query.message.reply_text(
+                get_text('enter_new_category_name', language) if 'enter_new_category_name' in TRANSLATIONS.get(language,
+                                                                                                               {})
+                else "Напиши новое название категории! 😊",
+                reply_markup=ReplyKeyboardMarkup([[get_text('cancel', language)]], resize_keyboard=True)
+            )
 
         elif action == "delete_category":
-            await handle_delete_category(query, context, parts, user_id)
+            category_id = int(parts[1]) if len(parts) > 1 else None
+
+            category = db.get_category(category_id, user_id)
+            category_name = category.category_name if category else "Unknown"
+
+            logger.info(
+                f"USER_ACTION: User {user_id} attempting to delete category '{category_name}' (category_id: {category_id})")
+
+            if db.delete_category(category_id, user_id):
+                logger.info(f"CATEGORY_DELETED: User {user_id} successfully deleted category '{category_name}'")
+                logger.info(f"CATEGORY_CLEANUP: All topics from category '{category_name}' moved to 'No category'")
+
+                await query.message.reply_text(
+                    get_text('category_deleted', language) if 'category_deleted' in TRANSLATIONS.get(language, {})
+                    else "Категория удалена! Темы перемещены в 'Без категории'. 😺",
+                    reply_markup=get_main_keyboard(language)
+                )
+                logger.debug(f"User {user_id} deleted category {category_id}")
+            else:
+                logger.warning(f"CATEGORY_DELETE_FAILED: Category {category_id} not found for user {user_id}")
+                await query.message.reply_text(
+                    get_text('category_not_found', language) if 'category_not_found' in TRANSLATIONS.get(language, {})
+                    else "Категория не найдена. 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+            context.user_data["state"] = None
 
         elif action == "move_topic":
-            await handle_move_topic(query, context, parts, user_id)
+            topic_id = int(parts[1]) if len(parts) > 1 else None
+            context.user_data["move_topic_id"] = topic_id
+            categories = db.get_categories(user_id)
+            keyboard = [
+                [InlineKeyboardButton(category.category_name, callback_data=f"move_to_category:{category.category_id}")]
+                for category in categories
+            ]
+            keyboard.append([InlineKeyboardButton(get_text('no_category', language, default="Без категории"),
+                                                  callback_data="move_to_category:none")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text(
+                get_text('select_new_category', language) if 'select_new_category' in TRANSLATIONS.get(language, {})
+                else "Выбери новую категорию для темы:",
+                reply_markup=reply_markup
+            )
+            context.user_data["state"] = "awaiting_category_selection"
 
         elif action == "move_to_category":
-            await handle_move_to_category(query, context, parts, user_id)
+            category_id_str = parts[1] if len(parts) > 1 else None
+            category_id = int(category_id_str) if category_id_str and category_id_str != "none" else None
+            topic_id = context.user_data.get("move_topic_id")
+
+            user = db.get_user(user_id)
+            topic = db.get_topic(topic_id, user_id, user.timezone if user else "UTC")
+            topic_name = topic.topic_name if topic else "Unknown"
+
+            old_category_name = db.get_category(topic.category_id,
+                                                user_id).category_name if topic and topic.category_id else get_text(
+                'no_category', language, default="Без категории")
+            new_category_name = db.get_category(category_id, user_id).category_name if category_id else get_text(
+                'no_category', language, default="Без категории")
+
+            if db.move_topic_to_category(topic_id, user_id, category_id):
+                logger.info(
+                    f"TOPIC_MOVED: User {user_id} moved topic '{topic_name}' from '{old_category_name}' to '{new_category_name}'")
+
+                await query.message.reply_text(
+                    get_text('topic_moved', language,
+                             new_category_name=new_category_name) if 'topic_moved' in TRANSLATIONS.get(language, {})
+                    else f"Тема перемещена в категорию '{new_category_name}'! 😺",
+                    reply_markup=get_main_keyboard(language)
+                )
+                logger.debug(f"User {user_id} moved topic {topic_id} to category {category_id}")
+            else:
+                logger.warning(f"TOPIC_MOVE_FAILED: Failed to move topic {topic_id} for user {user_id}")
+                await query.message.reply_text(
+                    get_text('topic_or_category_not_found',
+                             language) if 'topic_or_category_not_found' in TRANSLATIONS.get(language, {})
+                    else "Тема или категория не найдена. 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+            context.user_data["state"] = None
+            context.user_data.pop("move_topic_id", None)
 
         elif action == "add_to_new_category":
-            await handle_add_to_new_category(query, context, parts, user_id, user)
+            if len(parts) > 1 and parts[-1] == "no":
+                await query.message.reply_text(
+                    get_text('category_created_no_topics',
+                             language) if 'category_created_no_topics' in TRANSLATIONS.get(language, {})
+                    else "Категория создана без добавления тем! 😺",
+                    reply_markup=get_main_keyboard(language)
+                )
+                context.user_data.pop("new_category_id", None)
+                context.user_data["state"] = None
+            elif len(parts) > 2 and parts[-1] == "yes":
+                category_id = int(parts[1])
+                topics = db.get_active_topics(user_id, user.timezone, category_id='all')
+                if not topics:
+                    await query.message.reply_text(
+                        get_text('no_topics_to_add', language) if 'no_topics_to_add' in TRANSLATIONS.get(language, {})
+                        else "У тебя нет тем для добавления! 😿",
+                        reply_markup=get_main_keyboard(language)
+                    )
+                    context.user_data["state"] = None
+                    return
+
+                keyboard = [
+                    [InlineKeyboardButton(topic.topic_name, callback_data=f"add_to_category_topic:{topic.topic_id}")]
+                    for topic in topics
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.message.reply_text(
+                    get_text('select_topic_for_new_category',
+                             language) if 'select_topic_for_new_category' in TRANSLATIONS.get(language, {})
+                    else "Выбери тему для добавления в новую категорию:",
+                    reply_markup=reply_markup
+                )
+                context.user_data["move_to_category_id"] = category_id
+                context.user_data["state"] = "awaiting_topic_add_to_category"
 
         elif action == "add_to_category_topic":
-            await handle_add_to_category_topic(query, context, parts, user_id)
+            topic_id = int(parts[1]) if len(parts) > 1 else None
+            category_id = context.user_data.get("move_to_category_id")
+
+            if db.move_topic_to_category(topic_id, user_id, category_id):
+                category_name = db.get_category(category_id, user_id).category_name
+                await query.message.reply_text(
+                    get_text('topic_added_to_category', language,
+                             category_name=category_name) if 'topic_added_to_category' in TRANSLATIONS.get(language, {})
+                    else f"Тема добавлена в категорию '{category_name}'! 😺",
+                    reply_markup=get_main_keyboard(language)
+                )
+                logger.debug(f"User {user_id} added topic {topic_id} to category {category_id}")
+            else:
+                await query.message.reply_text(
+                    get_text('error_adding_topic', language) if 'error_adding_topic' in TRANSLATIONS.get(language, {})
+                    else "Ошибка добавления темы. 😿",
+                    reply_markup=get_main_keyboard(language)
+                )
+            context.user_data["state"] = None
+            context.user_data.pop("move_to_category_id", None)
 
         elif action == "repeated":
-            await handle_repeated_callback(query, context, parts, user_id, user)
+            await handle_repeated_callback(query, context, parts, user_id, user, language)
 
         elif data == "back_to_progress":
-            await show_progress(update, context)
+            await show_progress(update, context, language)
 
         elif data == "back_to_delete_categories":
-            await show_delete_categories(update, context, user_id)
+            await show_delete_categories(update, context, user_id, language)
 
         elif data == "back_to_restore_categories":
-            await show_restore_categories(update, context, user_id)
+            await show_restore_categories(update, context, user_id, language)
 
         elif data == "delete_all_topics":
             topics = db.get_active_topics(user_id, user.timezone, category_id='all')
             if not topics:
-                await query.answer("У тебя нет тем для удаления! 😿")
+                await query.answer(get_text('no_topics_to_delete', language, default="У тебя нет тем для удаления! 😿"))
                 return
 
             limited_topics = topics[:20]
             keyboard = []
             for topic in limited_topics:
                 category_name = db.get_category(topic.category_id,
-                                                user_id).category_name if topic.category_id else "📁 Без категории"
+                                                user_id).category_name if topic.category_id else get_text('no_category',
+                                                                                                          language,
+                                                                                                          default="📁 Без категории")
                 keyboard.append([
                     InlineKeyboardButton(
                         f"{topic.topic_name} ({category_name})",
@@ -1343,16 +1848,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
             if len(topics) > 20:
                 keyboard.append(
-                    [InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+                    [InlineKeyboardButton(get_text('back', language), callback_data="back_to_delete_categories")])
                 await query.message.edit_text(
-                    f"Слишком много тем для отображения ({len(topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
+                    get_text('too_many_topics', language, count=len(topics)) if 'too_many_topics' in TRANSLATIONS.get(
+                        language, {})
+                    else f"Слишком много тем для отображения ({len(topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
                 keyboard.append(
-                    [InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_delete_categories")])
+                    [InlineKeyboardButton(get_text('back', language), callback_data="back_to_delete_categories")])
                 await query.message.edit_text(
-                    "Выбери тему для удаления (восстановить будет нельзя):",
+                    get_text('select_topic_to_delete_all',
+                             language) if 'select_topic_to_delete_all' in TRANSLATIONS.get(language, {})
+                    else "Выбери тему для удаления (восстановить будет нельзя):",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             context.user_data["state"] = "awaiting_topic_deletion"
@@ -1360,14 +1869,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         elif data == "restore_all_topics":
             completed_topics = db.get_completed_topics(user_id)
             if not completed_topics:
-                await query.answer("У тебя нет завершённых тем для восстановления! 😿")
+                await query.answer(get_text('no_completed_topics_all', language,
+                                            default="У тебя нет завершённых тем для восстановления! 😿"))
                 return
 
             limited_topics = completed_topics[:20]
             keyboard = []
             for topic in limited_topics:
                 category_name = db.get_category(topic.category_id,
-                                                user_id).category_name if topic.category_id else "📁 Без категории"
+                                                user_id).category_name if topic.category_id else get_text('no_category',
+                                                                                                          language,
+                                                                                                          default="📁 Без категории")
                 keyboard.append([
                     InlineKeyboardButton(
                         f"{topic.topic_name} ({category_name})",
@@ -1377,30 +1889,35 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
             if len(completed_topics) > 20:
                 keyboard.append(
-                    [InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+                    [InlineKeyboardButton(get_text('back', language), callback_data="back_to_restore_categories")])
                 await query.message.edit_text(
-                    f"Слишком много тем для отображения ({len(completed_topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
+                    get_text('too_many_completed_topics', language,
+                             count=len(completed_topics)) if 'too_many_completed_topics' in TRANSLATIONS.get(language,
+                                                                                                             {})
+                    else f"Слишком много тем для отображения ({len(completed_topics)}). Показаны первые 20. Лучше используй выбор по категориям.",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
                 keyboard.append(
-                    [InlineKeyboardButton("⬅️ Назад к категориям", callback_data="back_to_restore_categories")])
+                    [InlineKeyboardButton(get_text('back', language), callback_data="back_to_restore_categories")])
                 await query.message.edit_text(
-                    "Выбери завершённую тему для восстановления:",
+                    get_text('select_completed_topic_to_restore',
+                             language) if 'select_completed_topic_to_restore' in TRANSLATIONS.get(language, {})
+                    else "Выбери завершённую тему для восстановления:",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             context.user_data["state"] = "awaiting_topic_restoration"
 
         else:
             logger.warning(f"Unknown callback data: {data} from user {user_id}")
-            await query.answer("Неизвестная команда")
+            await query.answer(get_text('unknown_command', language))
 
     except Exception as e:
         logger.error(f"Error handling callback {data} for user {user_id}: {str(e)}")
-        await query.answer("Произошла ошибка. Попробуйте снова.")
+        await query.answer(get_text('error_occurred', language))
         await query.message.reply_text(
-            "Ой, что-то пошло не так! 😿 Попробуй снова или используй /reset.",
-            reply_markup=MAIN_KEYBOARD
+            get_text('error_occurred', language),
+            reply_markup=get_main_keyboard(language)
         )
 
     await query.answer()
@@ -1414,20 +1931,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id)
     db.update_user_activity(user_id)
 
-    # ДОБАВЬ ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
-    logger.debug(f"User {user_id} ({username_display}) sent: '{text}', state: {context.user_data.get('state')}")
+    # Получаем язык пользователя или используем русский по умолчанию
+    language = user.language if user else 'ru'
+
+    logger.debug(
+        f"User {user_id} ({username_display}) sent: '{text}', state: {context.user_data.get('state')}, language: {language}")
+
+    # ========== ОБРАБОТКА ВЫБОРА ЯЗЫКА ЧЕРЕЗ ТЕКСТ ==========
+    if not user and not text.startswith("/"):
+        # Новый пользователь выбирает язык через текст
+        if text.lower() in ["русский", "russian", "ru", "🇷🇺 русский"]:
+            language = 'ru'
+        elif text.lower() in ["английский", "english", "en", "🇬🇧 english"]:
+            language = 'en'
+        else:
+            # Показываем меню выбора языка
+            keyboard = [
+                [
+                    InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+                    InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                get_text('choose_language', 'ru'),
+                reply_markup=reply_markup
+            )
+            return
+
+        # Сохраняем пользователя с выбранным языком
+        db.save_user(user_id, update.effective_user.username or "", "UTC", language)
+        user = db.get_user(user_id)  # Обновляем объект пользователя
+
+        # Показываем выбор часового пояса
+        keyboard = [
+            [
+                InlineKeyboardButton("Europe/Moscow (MSK, UTC+3)", callback_data="tz:Europe/Moscow"),
+                InlineKeyboardButton("America/New_York (EST, UTC-5)", callback_data="tz:America/New_York"),
+            ],
+            [
+                InlineKeyboardButton("Europe/London (GMT, UTC+0)", callback_data="tz:Europe/London"),
+                InlineKeyboardButton("Asia/Tokyo (JST, UTC+9)", callback_data="tz:Asia/Tokyo"),
+            ],
+            [InlineKeyboardButton(
+                get_text('other_manual', language) if 'other_manual' in TRANSLATIONS.get(language, {})
+                else ("Другой (введи вручную)" if language == 'ru' else "Other (enter manually)"),
+                callback_data="tz:manual")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            get_text('choose_timezone', language),
+            reply_markup=reply_markup
+        )
+        context.user_data["state"] = "awaiting_timezone"
+        return
 
     # ВАЖНОЕ ИСПРАВЛЕНИЕ: Если пользователь уже существует и пытается использовать основное меню,
     # но состояние застряло - принудительно сбрасываем состояние для основных команд
-    if user and text in ["Мой прогресс", "Добавить тему", "Удалить тему", "Восстановить тему", "Категории"]:
-        if context.user_data.get("state") in ["awaiting_timezone", "awaiting_manual_timezone"]:
-            logger.warning(f"Force resetting stuck timezone state for user {user_id}")
+    main_commands = get_text('main_keyboard', language)
+    if user and text in main_commands:
+        if context.user_data.get("state") in ["awaiting_timezone", "awaiting_manual_timezone", "awaiting_language"]:
+            logger.warning(f"Force resetting stuck state for user {user_id}")
             context.user_data["state"] = None
             context.user_data.clear()
 
     if not user and not text.startswith("/tz"):
         await update.message.reply_text(
-            "Пожалуйста, сначала выбери часовой пояс с помощью /tz.",
+            get_text('need_timezone', language),
             reply_markup=ReplyKeyboardMarkup([["/tz"]], resize_keyboard=True)
         )
         return
@@ -1456,7 +2028,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pytz.timezone(timezone_candidate)
 
             # Сохраняем часовой пояс
-            db.save_user(user_id, update.effective_user.username or "", timezone_candidate)
+            db.save_user(user_id, update.effective_user.username or "", timezone_candidate, language)
             schedule_daily_check(user_id, timezone_candidate)
 
             # ВАЖНО: Сбрасываем состояние после успешного сохранения
@@ -1464,9 +2036,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
 
             await update.message.reply_text(
-                f"✅ Часовой пояс {display_name} сохранен! 😺\n\n"
-                f"Теперь можно добавлять темы!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_set', language, timezone=display_name),
+                reply_markup=get_main_keyboard(language)
             )
 
             logger.info(f"User {user_id} successfully set timezone to: {timezone_candidate} (display: {display_name})")
@@ -1474,20 +2045,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except pytz.UnknownTimeZoneError:
             logger.warning(f"User {user_id} entered unknown timezone: {text}")
             await update.message.reply_text(
-                f"❌ Неизвестный часовой пояс: {text}\n\n"
-                "Доступные форматы:\n"
-                "• `Europe/Moscow`, `Asia/Tokyo`\n"
-                "• `+3`, `UTC+3`, `-5`, `UTC-5`\n"
-                "• Используй /tz для выбора из списка",
-                reply_markup=MAIN_KEYBOARD
+                get_text('timezone_error', language),
+                reply_markup=get_main_keyboard(language)
             )
             # Не сбрасываем состояние здесь - даем пользователю попробовать снова
 
         except Exception as e:
             logger.error(f"Error setting timezone for user {user_id}: {str(e)}")
             await update.message.reply_text(
-                "❌ Ошибка при сохранении часового пояса. Попробуй снова!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('error_occurred', language),
+                reply_markup=get_main_keyboard(language)
             )
             # Сбрасываем состояние при других ошибках
             context.user_data["state"] = None
@@ -1495,11 +2062,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "awaiting_category_name":
-        if text == "Отмена":
+        if text == get_text('cancel', language):
             context.user_data["state"] = None
             await update.message.reply_text(
-                "Создание категории отменено! 😺",
-                reply_markup=MAIN_KEYBOARD
+                get_text('action_canceled', language),
+                reply_markup=get_main_keyboard(language)
             )
             return
 
@@ -1507,8 +2074,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             category_id = db.add_category(user_id, text)
             keyboard = [
-                [InlineKeyboardButton("Да", callback_data=f"add_to_new_category:{category_id}:yes")],
-                [InlineKeyboardButton("Нет", callback_data="add_to_new_category:no")]
+                [InlineKeyboardButton(get_text('yes', language, default="Да"),
+                                      callback_data=f"add_to_new_category:{category_id}:yes")],
+                [InlineKeyboardButton(get_text('no', language, default="Нет"), callback_data="add_to_new_category:no")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1517,7 +2085,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"USER_ACTION: User {user_id} created category '{text}' ({len(categories)}/{MAX_CATEGORIES})")
 
             await update.message.reply_text(
-                f"Категория '{text}' создана! 😺 Добавить в неё темы?",
+                get_text('category_created_ask_add_topics', language, category_name=text)
+                if 'category_created_ask_add_topics' in TRANSLATIONS.get(language, {})
+                else f"Категория '{text}' создана! 😺 Добавить в неё темы?",
                 reply_markup=reply_markup
             )
             context.user_data["new_category_id"] = category_id
@@ -1525,17 +2095,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error creating category '{text}' for user {user_id}: {e}")
             await update.message.reply_text(
-                "Ой, что-то пошло не так при создании категории. 😔 Попробуй снова!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('error_occurred', language),
+                reply_markup=get_main_keyboard(language)
             )
         return
 
     if state == "awaiting_new_category_name":
-        if text == "Отмена":
+        if text == get_text('cancel', language):
             context.user_data["state"] = None
             await update.message.reply_text(
-                "Переименование категории отменено! 😺",
-                reply_markup=MAIN_KEYBOARD
+                get_text('action_canceled', language),
+                reply_markup=get_main_keyboard(language)
             )
             return
         category_id = context.user_data.get("rename_category_id")
@@ -1543,20 +2113,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             category = db.get_category(category_id, user_id)
             if category and db.rename_category(category_id, user_id, text):
                 await update.message.reply_text(
-                    f"Категория '{category.category_name}' переименована в '{text}'! 😺",
-                    reply_markup=MAIN_KEYBOARD
+                    get_text('category_renamed', language, old_name=category.category_name, new_name=text)
+                    if 'category_renamed' in TRANSLATIONS.get(language, {})
+                    else f"Категория '{category.category_name}' переименована в '{text}'! 😺",
+                    reply_markup=get_main_keyboard(language)
                 )
                 context.user_data["state"] = None
                 context.user_data.pop("rename_category_id", None)
             else:
                 await update.message.reply_text(
-                    "Категория не найдена. 😿 Попробуй снова!", reply_markup=MAIN_KEYBOARD
+                    get_text('category_not_found', language),
+                    reply_markup=get_main_keyboard(language)
                 )
         except Exception as e:
             logger.error(f"Error renaming category {category_id} for user {user_id}: {e}")
             await update.message.reply_text(
-                "Ой, что-то пошло не так при переименовании категории. 😔 Попробуй снова!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('error_occurred', language),
+                reply_markup=get_main_keyboard(language)
             )
         context.user_data["state"] = None
         return
@@ -1566,22 +2139,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = None
         context.user_data.clear()
         await update.message.reply_text(
-            "Действие отменено! 😺",
-            reply_markup=MAIN_KEYBOARD
+            get_text('action_canceled', language),
+            reply_markup=get_main_keyboard(language)
         )
         logger.debug(f"User {user_id} exited state {state} due to new command")
         return
 
-    if text.startswith("Повторил "):
-        topic_name = text[len("Повторил "):].strip()
+    # ОБРАБОТКА КОМАНДЫ "ПОВТОРИЛ"
+    if text.lower().startswith(get_text('repeated_prefix', language, default="повторил").lower()):
+        topic_name = text[len(get_text('repeated_prefix', language, default="повторил")):].strip()
         logger.info(f"USER_ACTION: User {user_id} attempting to mark topic '{topic_name}' as repeated via text command")
         try:
             result = db.mark_topic_repeated(user_id, topic_name, user.timezone)
             if not result:
-                logger.warning(f"TOPIC_NOT_FOUND: User {user_id} tried to mark unknown topic '{topic_name}' as repeated")
+                logger.warning(
+                    f"TOPIC_NOT_FOUND: User {user_id} tried to mark unknown topic '{topic_name}' as repeated")
                 await update.message.reply_text(
-                    f"Тема '{topic_name}' не найдена или уже завершена. 😿 Попробуй снова!",
-                    reply_markup=MAIN_KEYBOARD
+                    get_text('topic_not_found_or_completed', language, topic_name=topic_name)
+                    if 'topic_not_found_or_completed' in TRANSLATIONS.get(language, {})
+                    else f"Тема '{topic_name}' не найдена или уже завершена. 😿 Попробуй снова!",
+                    reply_markup=get_main_keyboard(language)
                 )
                 return
             topic_id, completed_repetitions, next_reminder_time, reminder_id = result
@@ -1609,44 +2186,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     logger.info(
                         f"REMINDER_SCHEDULED: Next reminder for '{topic_name}' scheduled for {next_reminder_str} (reminder_id: {reminder_id})")
+
+                message = get_text('topic_repeated_with_next', language,
+                                   topic_name=topic_name,
+                                   completed=completed_repetitions,
+                                   total=total_repetitions,
+                                   next_time=next_reminder_str,
+                                   progress_bar=progress_bar,
+                                   percentage=progress_percentage)
+                if not message:
+                    message = f"Тема '{topic_name}' отмечена как повторённая! 😺\nЗавершено: {completed_repetitions}/{total_repetitions} повторений\nСледующее повторение: {next_reminder_str}\nПрогресс: {progress_bar} {progress_percentage:.1f}%"
+
                 await update.message.reply_text(
-                    f"Тема '{topic_name}' отмечена как повторённая! 😺\n"
-                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                    f"Следующее повторение: {next_reminder_str}\n"
-                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%",
-                    reply_markup=MAIN_KEYBOARD
+                    message,
+                    reply_markup=get_main_keyboard(language)
                 )
             else:
                 logger.info(f"TOPIC_COMPLETED: User {user_id} completed topic '{topic_name}' via text command!")
+
+                message = get_text('topic_completed', language,
+                                   topic_name=topic_name,
+                                   completed=completed_repetitions,
+                                   total=total_repetitions,
+                                   progress_bar=progress_bar,
+                                   percentage=progress_percentage)
+                if not message:
+                    message = f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\nЗавершено: {completed_repetitions}/{total_repetitions} повторений\nПрогресс: {progress_bar} {progress_percentage:.1f}%\nЕсли захочешь повторить её заново, используй 'Восстановить тему'. 😺"
+
                 await update.message.reply_text(
-                    f"🎉 Поздравляю, ты полностью освоил тему '{topic_name}'! 🏆\n"
-                    f"Завершено: {completed_repetitions}/{total_repetitions} повторений\n"
-                    f"Прогресс: {progress_bar} {progress_percentage:.1f}%\n"
-                    f"Если захочешь повторить её заново, используй 'Восстановить тему'. 😺",
-                    reply_markup=MAIN_KEYBOARD
+                    message,
+                    reply_markup=get_main_keyboard(language)
                 )
         except Exception as e:
             logger.error(f"ERROR: Failed to mark topic '{topic_name}' as repeated for user {user_id}: {str(e)}")
             await update.message.reply_text(
-                "Ой, что-то пошло не так при отметке повторения. 😔 Попробуй снова!",
-                reply_markup=MAIN_KEYBOARD
+                get_text('error_occurred', language),
+                reply_markup=get_main_keyboard(language)
             )
         return
 
-    if text == "Мой прогресс":
-        await show_progress(update, context)
+    # ОБРАБОТКА ОСНОВНЫХ КОМАНД МЕНЮ
+    main_commands_list = get_text('main_keyboard', language)
+
+    if text == main_commands_list[0]:  # Мой прогресс / My Progress
+        await show_progress(update, context, language)
         return
 
-    if text == "Добавить тему":
+    if text == main_commands_list[1]:  # Добавить тему / Add Topic
         # ПРОВЕРКА ЛИМИТА СРАЗУ ПРИ НАЖАТИИ КНОПКИ
         active_topics = db.get_active_topics(user_id, user.timezone, category_id='all')
         if len(active_topics) >= MAX_ACTIVE_TOPICS:
             await update.message.reply_text(
-                f"❌ Достигнут лимит активных тем ({MAX_ACTIVE_TOPICS})! 😿\n\n"
-                f"Чтобы добавить новую тему, сначала заверши или удали одну из существующих.\n"
-                f"Сейчас у тебя {len(active_topics)} активных тем.\n\n"
-                f"💡 *Совет:* Лучше сосредоточься на качестве, а не количестве!",
-                reply_markup=MAIN_KEYBOARD,
+                get_text('topic_limit_reached', language, max_topics=MAX_ACTIVE_TOPICS,
+                         current_count=len(active_topics)),
+                reply_markup=get_main_keyboard(language),
                 parse_mode="Markdown"
             )
             logger.info(
@@ -1656,64 +2249,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если лимит не достигнут, переходим к вводу названия темы
         context.user_data["state"] = "awaiting_topic_name"
         await update.message.reply_text(
-            "Напиши название темы, которую хочешь добавить! 😊",
-            reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
+            get_text('enter_topic_name', language),
+            reply_markup=ReplyKeyboardMarkup([[get_text('cancel', language)]], resize_keyboard=True)
         )
 
-        # Логирование начала создания темы
         logger.info(f"USER_ACTION: User {user_id} starting to add new topic ({len(active_topics)}/{MAX_ACTIVE_TOPICS})")
         return
 
-    if text == "Удалить тему":
-        await show_delete_categories(update, context, user_id)
+    if text == main_commands_list[2]:  # Удалить тему / Delete Topic
+        await show_delete_categories(update, context, user_id, language)
         return
 
-    if text == "Восстановить тему":
-        await show_restore_categories(update, context, user_id)
+    if text == main_commands_list[3]:  # Восстановить тему / Restore Topic
+        await show_restore_categories(update, context, user_id, language)
         return
 
-    if text == "Категории":
-        # ПРОВЕРКА ЛИМИТА ПРИ СОЗДАНИИ КАТЕГОРИИ (если пользователь выберет создание)
+    if text == main_commands_list[4]:  # Категории / Categories
+        # ПРОВЕРКА ЛИМИТА ПРИ СОЗДАНИИ КАТЕГОРИИ
         categories = db.get_categories(user_id)
 
         keyboard = [
             [
-                InlineKeyboardButton("Создать категорию", callback_data="category_action:create"),
-                InlineKeyboardButton("Переименовать категорию", callback_data="category_action:rename"),
+                InlineKeyboardButton(get_text('create_category', language), callback_data="category_action:create"),
+                InlineKeyboardButton(get_text('rename_category', language), callback_data="category_action:rename"),
             ],
             [
-                InlineKeyboardButton("Перенести тему", callback_data="category_action:move"),
-                InlineKeyboardButton("Удалить категорию", callback_data="category_action:delete"),
+                InlineKeyboardButton(get_text('move_topic', language), callback_data="category_action:move"),
+                InlineKeyboardButton(get_text('delete_category', language), callback_data="category_action:delete"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Добавляем информацию о лимите в сообщение
-        limit_info = f"\n\n📁 Категорий: {len(categories)}/{MAX_CATEGORIES}"
+        # Используем get_text для limit_info
+        limit_info = get_text('categories_limit_info', language, current=len(categories), max=MAX_CATEGORIES)
+
+        message_text = get_text('select_category_action', language)
+        if limit_info:
+            message_text += limit_info
 
         await update.message.reply_text(
-            f"Выбери действие с категориями:{limit_info}",
+            message_text,
             reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_category_action"
         return
 
-    if text == "Отмена":
+    if text == get_text('cancel', language):
         context.user_data["state"] = None
         context.user_data.clear()
         await update.message.reply_text(
-            "Действие отменено! 😺",
-            reply_markup=MAIN_KEYBOARD
+            get_text('action_canceled', language),
+            reply_markup=get_main_keyboard(language)
         )
         return
 
     if state == "awaiting_topic_name":
-        if text == "Отмена":
+        if text == get_text('cancel', language):
             context.user_data["state"] = None
             context.user_data.clear()
             await update.message.reply_text(
-                "Действие отменено! 😺",
-                reply_markup=MAIN_KEYBOARD
+                get_text('action_canceled', language),
+                reply_markup=get_main_keyboard(language)
             )
             return
 
@@ -1723,21 +2319,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(category.category_name, callback_data=f"add_topic_category:{category.category_id}")]
             for category in categories
         ]
-        keyboard.append([InlineKeyboardButton("Без категории", callback_data="add_topic_category:none")])
+        keyboard.append([InlineKeyboardButton(get_text('no_category', language, default="Без категории"),
+                                              callback_data="add_topic_category:none")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Логирование создания темы
         logger.info(f"USER_ACTION: User {user_id} creating topic '{text}'")
 
         await update.message.reply_text(
-            "Выбери категорию для темы:", reply_markup=reply_markup
+            get_text('select_category_for_topic', language) if 'select_category_for_topic' in TRANSLATIONS.get(language,
+                                                                                                               {})
+            else "Выбери категорию для темы:",
+            reply_markup=reply_markup
         )
         context.user_data["state"] = "awaiting_topic_category"
         return
 
+    # Если команда не распознана
     await update.message.reply_text(
-        "Неизвестная команда. 😿",
-        reply_markup=MAIN_KEYBOARD
+        get_text('unknown_command', language),
+        reply_markup=get_main_keyboard(language)
     )
 
 
@@ -1757,12 +2358,16 @@ async def send_reminder_with_retry(bot, user_id: int, topic_name: str, reminder_
             logger.error(f"REMINDER_ERROR: User {user_id} not found for reminder {reminder_id}")
             return
 
+        # Получаем язык пользователя
+        language = user.language if user else 'ru'
+
         topic = db.get_topic_by_reminder_id(reminder_id, user_id, user.timezone)
         if not topic:
             logger.error(f"REMINDER_ERROR: Topic not found for reminder {reminder_id}")
             return
 
-        keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+        button_text = get_text('repeated_button', language)
+        keyboard = [[InlineKeyboardButton(button_text, callback_data=f"repeated:{reminder_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         logger.info(
@@ -1770,7 +2375,7 @@ async def send_reminder_with_retry(bot, user_id: int, topic_name: str, reminder_
 
         await bot.send_message(
             chat_id=user_id,
-            text=f"⏰ Пора повторить тему '{topic_name}'! 😺",
+            text=get_text('reminder_time', language, topic_name=topic_name),
             reply_markup=reply_markup
         )
 
@@ -1845,13 +2450,12 @@ async def send_reactivation_message(bot, user_id: int, stage: int):
             logger.warning(f"REACTIVATION: Unknown stage {stage} for user {user_id}")
             return
 
-        # Выбираем случайное сообщение
-        messages = REACTIVATION_MESSAGES.get(mood, [])
-        if not messages:
-            logger.error(f"REACTIVATION: No messages found for mood {mood}")
+        # Используем get_kex_message вместо REACTIVATION_MESSAGES
+        message_data = get_kex_message(mood, user.language)
+        if not message_data:
+            logger.error(f"REACTIVATION: No messages found for mood {mood} and language {user.language}")
             return
 
-        message_data = random.choice(messages)
         text = message_data["text"]
         image_filename = message_data["image"]
 
@@ -1948,6 +2552,9 @@ async def check_overdue_for_user(app: Application, user_id: int):
             logger.warning(f"OVERDUE_CHECK: User {user_id} not found")
             return
 
+        # Получаем язык пользователя
+        language = user.language if user else 'ru'
+
         tz = pytz.timezone(user.timezone)
         now_utc = datetime.utcnow()
         now_local = pytz.utc.localize(now_utc).astimezone(tz)
@@ -1965,12 +2572,13 @@ async def check_overdue_for_user(app: Application, user_id: int):
             if next_review_local < now_local:
                 # Создаем временное напоминание для кнопки
                 reminder_id = db.add_reminder(user_id, topic.topic_id, now_utc)
-                keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+                button_text = get_text('repeated_button', language)
+                keyboard = [[InlineKeyboardButton(button_text, callback_data=f"repeated:{reminder_id}")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
                 await app.bot.send_message(
                     chat_id=user_id,
-                    text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic.topic_name}'! 😺",
+                    text=get_text('overdue_reminder', language, topic_name=topic.topic_name),
                     reply_markup=reply_markup
                 )
                 overdue_count += 1
@@ -2031,6 +2639,9 @@ async def init_scheduler(app: Application):
         logger.info(f"Processing user {i}/{len(users)}: {user.user_id} ({username_display})")
 
         try:
+            # Получаем язык пользователя
+            language = user.language if user else 'ru'
+
             active_topics = db.get_active_topics(user.user_id, user.timezone, category_id='all')
             logger.info(f"User {user.user_id} ({username_display}) has {len(active_topics)} active topics")
 
@@ -2055,12 +2666,13 @@ async def init_scheduler(app: Application):
                     else:
                         reminder_id = db.add_reminder(user.user_id, topic.topic_id, datetime.utcnow())
 
-                    keyboard = [[InlineKeyboardButton("Повторил!", callback_data=f"repeated:{reminder_id}")]]
+                    button_text = get_text('repeated_button', language)
+                    keyboard = [[InlineKeyboardButton(button_text, callback_data=f"repeated:{reminder_id}")]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
                     await app.bot.send_message(
                         chat_id=user.user_id,
-                        text=f"⏰ Просроченное напоминание! Пора повторить тему '{topic.topic_name}'! 😺",
+                        text=get_text('overdue_reminder', language, topic_name=topic.topic_name),
                         reply_markup=reply_markup
                     )
                     overdue_count += 1
@@ -2115,6 +2727,7 @@ async def init_scheduler(app: Application):
     logger.info(
         f"Scheduler initialization complete. Total jobs: {total_jobs}, Total scheduled: {total_scheduled}, Total overdue: {total_overdue}")
 
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     text = "Ой, что-то пошло не так! 😿 Попробуй снова или используй /reset."
@@ -2164,6 +2777,8 @@ async def main():
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CommandHandler("lang", language_command))
 
     # Запускаем планировщик
     try:
