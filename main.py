@@ -2300,6 +2300,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для очистки дубликатов напоминаний"""
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} requested cleanup of duplicate reminders")
+
+    # Проверяем, что это администратор (добавьте свою логику проверки)
+    # Пока разрешаем всем для тестирования
+
+    try:
+        removed_count = db.cleanup_duplicate_reminders()
+
+        if removed_count > 0:
+            await update.message.reply_text(
+                f"✅ Очистка завершена! Удалено {removed_count} дубликатов напоминаний."
+            )
+        else:
+            await update.message.reply_text(
+                "✅ Дубликатов не найдено. База данных в порядке!"
+            )
+
+    except Exception as e:
+        logger.error(f"Error in cleanup_command: {str(e)}")
+        await update.message.reply_text(
+            f"❌ Ошибка при очистке: {str(e)}"
+        )
+
 @retry(
     stop=stop_after_attempt(3),  # 3 попытки
     wait=wait_exponential(multiplier=1, min=2, max=10),  # экспоненциальная задержка
@@ -2727,11 +2753,22 @@ async def main():
         logger.error(f"Failed to create bot application: {e}")
         raise
 
+    # ВАЖНО: Очищаем дубликаты при запуске
+    try:
+        logger.info("Checking for duplicate reminders...")
+        removed = db.cleanup_duplicate_reminders()
+        if removed > 0:
+            logger.info(f"Removed {removed} duplicate reminders on startup")
+    except Exception as e:
+        logger.error(f"Failed to cleanup duplicates on startup: {e}")
+        # Не прерываем запуск, продолжаем
+
     # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tz", handle_timezone))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("cleanup", cleanup_command))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

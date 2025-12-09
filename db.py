@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import QueuePool
@@ -48,6 +48,9 @@ class Topic(Base):
 
 class Reminder(Base):
     __tablename__ = 'reminders'
+    __table_args__ = (
+        UniqueConstraint('topic_id', name='uq_reminder_topic'),  # <-- ВАЖНОЕ ИСПРАВЛЕНИЕ
+    )
     reminder_id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.user_id'))
     topic_id = Column(Integer, ForeignKey('topics.topic_id'))
@@ -230,22 +233,29 @@ class Database:
             session.flush()  # Получаем topic_id
             logger.info(f"DB_OPERATION: Topic created with ID {topic.topic_id}")
 
-            # Создаем напоминание
-            reminder = Reminder(
-                user_id=user_id,
-                topic_id=topic.topic_id,
-                scheduled_time=next_review_utc
-            )
-            session.add(reminder)
-            session.flush()  # Получаем reminder_id
-            logger.info(f"DB_OPERATION: Reminder created with ID {reminder.reminder_id}")
+            # ВАЖНОЕ ИСПРАВЛЕНИЕ: Проверяем, нет ли уже напоминания для этой темы
+            existing_reminder = session.query(Reminder).filter_by(topic_id=topic.topic_id).first()
+            if existing_reminder:
+                logger.warning(f"DB_OPERATION: Reminder already exists for topic {topic.topic_id}, skipping creation")
+                reminder_id = existing_reminder.reminder_id
+            else:
+                # Создаем напоминание
+                reminder = Reminder(
+                    user_id=user_id,
+                    topic_id=topic.topic_id,
+                    scheduled_time=next_review_utc
+                )
+                session.add(reminder)
+                session.flush()  # Получаем reminder_id
+                reminder_id = reminder.reminder_id
+                logger.info(f"DB_OPERATION: Reminder created with ID {reminder_id}")
 
             # КОММИТИМ ТРАНЗАКЦИЮ
             session.commit()
             logger.info(
-                f"DB_OPERATION: Transaction COMMITTED for topic {topic.topic_id}, reminder {reminder.reminder_id}")
+                f"DB_OPERATION: Transaction COMMITTED for topic {topic.topic_id}, reminder {reminder_id}")
 
-            return topic.topic_id, reminder.reminder_id
+            return topic.topic_id, reminder_id
 
         except Exception as e:
             logger.error(f"DB_OPERATION: ERROR in transaction: {str(e)}")
@@ -697,9 +707,9 @@ class Database:
                 next_review_local = now_local + timedelta(days=intervals[topic.completed_repetitions])
                 topic.next_review = self._to_utc_naive(next_review_local, timezone)
 
-                # ОБНОВЛЯЕМ СУЩЕСТВУЮЩЕЕ НАПОМИНАНИЕ
+                # ВАЖНОЕ ИСПРАВЛЕНИЕ: Обновляем СУЩЕСТВУЮЩЕЕ напоминание, а не создаем новое
                 reminder.scheduled_time = topic.next_review
-                new_reminder_id = reminder.reminder_id
+                new_reminder_id = reminder.reminder_id  # Используем тот же ID
 
                 logger.info(
                     f"TOPIC_UPDATED: Topic {topic.topic_id} advanced to stage {topic.completed_repetitions}, next review: {next_review_local}")
@@ -715,8 +725,9 @@ class Database:
                     completed_at=now_utc
                 )
                 session.add(completed_topic)
-                # УДАЛЯЕМ напоминание — оно больше никогда не понадобится
-                session.query(Reminder).filter_by(topic_id=topic.topic_id).delete()
+
+                # ВАЖНОЕ ИСПРАВЛЕНИЕ: Удаляем напоминание только если тема завершена
+                session.delete(reminder)
                 new_reminder_id = None
                 logger.info(
                     f"TOPIC_COMPLETED_AND_REMINDER_DELETED: Topic {topic.topic_id} completed and reminder removed from DB")
@@ -909,6 +920,64 @@ class Database:
         except Exception as e:
             session.rollback()
             logger.error(f"Error updating reactivation stage for {user_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def cleanup_duplicate_reminders(self):
+        """Очищает дубликаты напоминаний (оставляет только самое новое для каждой темы)"""
+        session = self.Session()
+        try:
+            from sqlalchemy import func
+
+            logger.info("Starting cleanup of duplicate reminders...")
+
+            # Находим темы с несколькими напоминаниями
+            duplicates = session.query(
+                Reminder.topic_id,
+                func.count(Reminder.reminder_id).label('count')
+            ).group_by(Reminder.topic_id).having(func.count(Reminder.reminder_id) > 1).all()
+
+            total_removed = 0
+
+            for topic_id, count in duplicates:
+                logger.info(f"Found {count} reminders for topic {topic_id}")
+
+                # Получаем все напоминания для этой темы, отсортированные по времени
+                reminders = session.query(Reminder).filter_by(
+                    topic_id=topic_id
+                ).order_by(
+                    Reminder.scheduled_time.desc()  # Сначала самые новые
+                ).all()
+
+                # Оставляем только первое (самое новое), остальные удаляем
+                for i, reminder in enumerate(reminders):
+                    if i == 0:  # Оставляем первое
+                        logger.info(f"Keeping reminder {reminder.reminder_id} for topic {topic_id}")
+                        continue
+
+                    # Удаляем дубликат
+                    session.delete(reminder)
+                    total_removed += 1
+                    logger.info(f"Removed duplicate reminder {reminder.reminder_id} for topic {topic_id}")
+
+            if total_removed > 0:
+                session.commit()
+                logger.info(f"Cleanup complete: removed {total_removed} duplicate reminders")
+                return total_removed
+            else:
+                logger.info("No duplicate reminders found")
+                return 0
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error in cleanup_duplicate_reminders: {str(e)}")
             raise
         finally:
             session.close()
