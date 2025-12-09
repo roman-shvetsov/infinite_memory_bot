@@ -335,6 +335,73 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"User {user_id} reset state")
 
 
+async def perf_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тест производительности инициализации"""
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} requested performance test")
+
+    try:
+        message = await update.message.reply_text("🔄 Запускаю тест производительности...")
+
+        # ЗАПОМИНАЕМ текущие задания
+        jobs_before = len(scheduler.get_jobs())
+
+        # Замеряем время
+        start_time = time.time()
+
+        # УДАЛЯЕМ все существующие задания перед тестом
+        for job in scheduler.get_jobs():
+            job.remove()
+        logger.info(f"Removed {jobs_before} existing jobs before test")
+
+        # Тестируем оптимизированную инициализацию
+        scheduled, overdue = await init_scheduler_optimized(app)
+
+        elapsed_time = time.time() - start_time
+
+        # Получаем статистику
+        total_users = len(db.get_all_users())
+
+        # Считаем темы более эффективно
+        total_topics = 0
+        users = db.get_all_users()
+        for user in users:
+            topics = db.get_active_topics(user.user_id, user.timezone, category_id='all')
+            total_topics += len(topics)
+
+        total_jobs = len(scheduler.get_jobs())
+
+        result_text = (
+            f"✅ Тест производительности завершен!\n\n"
+            f"📊 **Статистика:**\n"
+            f"• Пользователей: {total_users}\n"
+            f"• Активных тем: {total_topics}\n"
+            f"• Запланировано: {scheduled}\n"
+            f"• Просрочено: {overdue}\n"
+            f"• Всего заданий: {total_jobs}\n\n"
+            f"⏱ **Время выполнения:** {elapsed_time:.2f} секунд\n\n"
+        )
+
+        # Оценка производительности
+        if elapsed_time < 1:
+            result_text += "⚡ **Быстрее молнии!** Идеальная производительность!"
+        elif elapsed_time < 3:
+            result_text += "⚡ **Отлично!** Система готова к масштабированию."
+        elif elapsed_time < 10:
+            result_text += "👍 **Хорошо!** Производительность приемлемая."
+        else:
+            result_text += "⚠️ **Требует оптимизации!** При увеличении пользователей будут проблемы."
+
+        await message.edit_text(result_text)
+
+    except Exception as e:
+        logger.error(f"Error in perf_test: {str(e)}")
+        try:
+            await update.message.reply_text(f"❌ Ошибка при тестировании: {str(e)}")
+        except:
+            pass
+
+
 async def handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.split(maxsplit=1)[1] if len(update.message.text.split()) > 1 else None
@@ -2610,6 +2677,152 @@ def schedule_daily_check(user_id: int, timezone: str):
     logger.debug(f"Scheduled daily checks for user {user_id} at 9:00 and reactivation at 19:00 {timezone}")
 
 
+async def init_scheduler_optimized(app: Application):
+    """Оптимизированная инициализация планировщика с пагинацией"""
+    logger.info("🚀 Starting OPTIMIZED scheduler initialization")
+
+    batch_size = 100  # Обрабатываем по 100 пользователей за раз
+    offset = 0
+    total_scheduled = 0
+    total_overdue = 0
+    total_users_processed = 0
+
+    start_time = time.time()
+
+    while True:
+        # Получаем пачку пользователей
+        users = db.get_users_batch(offset, batch_size)
+        if not users:
+            break
+
+        user_count = len(users)
+        total_users_processed += user_count
+        logger.info(
+            f"📦 Processing batch {offset // batch_size + 1}: {user_count} users (total: {total_users_processed})")
+
+        # Получаем ID пользователей
+        user_ids = [user.user_id for user in users]
+
+        # ОДИН запрос для всех активных тем этих пользователей
+        all_topics = db.get_active_topics_batch(user_ids)
+
+        # Группируем темы по пользователям
+        topics_by_user = {}
+        for topic in all_topics:
+            if topic.user_id not in topics_by_user:
+                topics_by_user[topic.user_id] = []
+            topics_by_user[topic.user_id].append(topic)
+
+        # Получаем ID всех тем
+        topic_ids = [topic.topic_id for topic in all_topics]
+
+        # ОДИН запрос для всех напоминаний этих тем
+        reminders_dict = db.get_reminders_batch(topic_ids)
+
+        # Обрабатываем каждого пользователя в пачке
+        batch_scheduled = 0
+        batch_overdue = 0
+
+        for user in users:
+            user_topics = topics_by_user.get(user.user_id, [])
+            user_scheduled = 0
+            user_overdue = 0
+
+            tz = pytz.timezone(user.timezone)
+            now_local = datetime.now(tz)
+
+            for topic in user_topics:
+                # Берем напоминание из словаря (быстрый доступ)
+                reminder = reminders_dict.get(topic.topic_id)
+
+                if topic.next_review is None or topic.is_completed:
+                    continue
+
+                next_review_local = db._from_utc_naive(topic.next_review, user.timezone)
+
+                if next_review_local < now_local:
+                    # Просроченная тема
+                    if reminder:
+                        reminder_id = reminder.reminder_id
+                    else:
+                        reminder_id = db.add_reminder(user.user_id, topic.topic_id, datetime.utcnow())
+
+                    # Отправляем напоминание сразу
+                    button_text = get_text('repeated_button', user.language)
+                    keyboard = [[InlineKeyboardButton(button_text, callback_data=f"repeated:{reminder_id}")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    try:
+                        await app.bot.send_message(
+                            chat_id=user.user_id,
+                            text=get_text('overdue_reminder', user.language, topic_name=topic.topic_name),
+                            reply_markup=reply_markup
+                        )
+                        user_overdue += 1
+                        logger.debug(f"Sent overdue reminder for topic '{topic.topic_name}' to user {user.user_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send overdue reminder to user {user.user_id}: {str(e)}")
+
+                else:
+                    # Планируем напоминание
+                    if reminder:
+                        reminder_id = reminder.reminder_id
+                    else:
+                        reminder_id = db.add_reminder(user.user_id, topic.topic_id, topic.next_review)
+
+                    # Добавляем в планировщик
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=next_review_local,
+                        args=[app.bot, user.user_id, topic.topic_name, reminder_id],
+                        id=f"reminder_{reminder_id}_{user.user_id}",
+                        timezone=tz,
+                        misfire_grace_time=None
+                    )
+                    user_scheduled += 1
+
+            # Планируем ежедневные проверки для пользователя
+            schedule_daily_check(user.user_id, user.timezone)
+
+            batch_scheduled += user_scheduled
+            batch_overdue += user_overdue
+
+            # Логируем каждые 10 пользователей или последнего
+            if user_scheduled > 0 or user_overdue > 0:
+                logger.debug(f"User {user.user_id}: {user_scheduled} scheduled, {user_overdue} overdue")
+
+        total_scheduled += batch_scheduled
+        total_overdue += batch_overdue
+
+        offset += batch_size
+
+        # Делаем небольшую паузу между пачками, чтобы не перегружать БД
+        if len(users) == batch_size:  # Если есть еще пользователи
+            await asyncio.sleep(0.1)  # 100ms пауза
+
+    elapsed_time = time.time() - start_time
+    total_jobs = len(scheduler.get_jobs())
+
+    logger.info(f"✅ OPTIMIZED initialization COMPLETE in {elapsed_time:.2f} seconds")
+    logger.info(
+        f"📊 STATS: Users: {total_users_processed}, Scheduled: {total_scheduled}, Overdue: {total_overdue}, Total jobs: {total_jobs}")
+
+    # Глобальное задание для реактивации
+    if not scheduler.get_job("global_reactivation_check"):
+        scheduler.add_job(
+            check_inactive_users,
+            'cron',
+            hour=19,
+            minute=0,
+            timezone="UTC",
+            args=[app],
+            id="global_reactivation_check"
+        )
+
+    return total_scheduled, total_overdue
+
+
 async def init_scheduler(app: Application):
     users = db.get_all_users()
     logger.info(f"Initializing scheduler for {len(users)} users")
@@ -2769,6 +2982,7 @@ async def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("cleanup", cleanup_command))
+    app.add_handler(CommandHandler("perf", perf_test))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
@@ -2783,9 +2997,9 @@ async def main():
         logger.error(f"Failed to start scheduler: {e}")
         raise
 
-    # Инициализируем планировщик с существующими напоминаниями
+    # Инициализируем планировщик с ОПТИМИЗИРОВАННОЙ версией
     try:
-        await init_scheduler(app)
+        await init_scheduler_optimized(app)
         logger.info("Scheduler initialized with existing reminders")
     except Exception as e:
         logger.error(f"Failed to initialize scheduler: {e}")

@@ -981,3 +981,62 @@ class Database:
             raise
         finally:
             session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_users_batch(self, offset: int, limit: int):
+        """Получает пользователей пачкой для оптимизации"""
+        session = self.Session()
+        try:
+            users = session.query(User).order_by(User.user_id).offset(offset).limit(limit).all()
+            return users
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_active_topics_batch(self, user_ids: list):
+        """Получает активные темы для списка пользователей одним запросом"""
+        session = self.Session()
+        try:
+            if not user_ids:
+                return []
+
+            topics = session.query(Topic).filter(
+                Topic.user_id.in_(user_ids),
+                Topic.is_completed == False
+            ).all()
+            return topics
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_reminders_batch(self, topic_ids: list):
+        """Получает напоминания для списка тем одним запросом"""
+        session = self.Session()
+        try:
+            if not topic_ids:
+                return []
+
+            reminders = session.query(Reminder).filter(
+                Reminder.topic_id.in_(topic_ids)
+            ).all()
+
+            # Создаем словарь для быстрого поиска
+            reminders_dict = {r.topic_id: r for r in reminders}
+            return reminders_dict
+        finally:
+            session.close()
