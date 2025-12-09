@@ -256,8 +256,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [
                 InlineKeyboardButton("🇨🇳 中文", callback_data="lang:zh"),
-                InlineKeyboardButton("🇮🇳 हिन्दी", callback_data="lang:hi"),
                 InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang:de"),
+                InlineKeyboardButton("🇫🇷 Français", callback_data="lang:fr"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -280,10 +280,17 @@ async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id)
     current_lang = user.language if user else 'ru'
 
+    # ОБНОВЛЕННАЯ КЛАВИАТУРА СО ВСЕМИ ЯЗЫКАМИ
     keyboard = [
         [
             InlineKeyboardButton(f"🇷🇺 Русский {'✅' if current_lang == 'ru' else ''}", callback_data="change_lang:ru"),
-            InlineKeyboardButton(f"🇬🇧 English {'✅' if current_lang == 'en' else ''}", callback_data="change_lang:en")
+            InlineKeyboardButton(f"🇬🇧 English {'✅' if current_lang == 'en' else ''}", callback_data="change_lang:en"),
+            InlineKeyboardButton(f"🇪🇸 Español {'✅' if current_lang == 'es' else ''}", callback_data="change_lang:es"),
+        ],
+        [
+            InlineKeyboardButton(f"🇨🇳 中文 {'✅' if current_lang == 'zh' else ''}", callback_data="change_lang:zh"),
+            InlineKeyboardButton(f"🇩🇪 Deutsch {'✅' if current_lang == 'de' else ''}", callback_data="change_lang:de"),
+            InlineKeyboardButton(f"🇫🇷 Français {'✅' if current_lang == 'fr' else ''}", callback_data="change_lang:fr"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -554,55 +561,6 @@ async def handle_timezone_callback(query, context, parts, user_id):
             )
 
     await query.answer()
-
-
-async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для смены языка"""
-    user_id = update.effective_user.id
-    text = update.message.text.split(maxsplit=1)[1] if len(update.message.text.split()) > 1 else None
-    logger.debug(f"User {user_id} sent language command: {text}")
-
-    user = db.get_user(user_id)
-    current_lang = user.language if user else 'ru'
-
-    # Если указан язык напрямую в команде
-    if text:
-        if text.lower() in ["русский", "russian", "ru"]:
-            new_lang = 'ru'
-        elif text.lower() in ["английский", "english", "en"]:
-            new_lang = 'en'
-        else:
-            # Неправильный язык - показываем выбор
-            await update.message.reply_text(
-                get_text('language_invalid', current_lang),
-                reply_markup=get_main_keyboard(current_lang)
-            )
-            return
-
-        # Меняем язык
-        if user:
-            db.save_user(user_id, user.username or "", user.timezone, new_lang)
-            await update.message.reply_text(
-                get_text('language_set', new_lang),
-                reply_markup=get_main_keyboard(new_lang)
-            )
-            logger.info(f"User {user_id} changed language to {new_lang} via command")
-        return
-
-    # Показываем выбор языка
-    keyboard = [
-        [
-            InlineKeyboardButton(f"🇷🇺 Русский {'✅' if current_lang == 'ru' else ''}", callback_data="change_lang:ru"),
-            InlineKeyboardButton(f"🇬🇧 English {'✅' if current_lang == 'en' else ''}", callback_data="change_lang:en")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        get_text('choose_language', current_lang),
-        reply_markup=reply_markup
-    )
-    context.user_data["state"] = "awaiting_language_change"
 
 
 async def handle_repeated_callback(query, context, parts, user_id, user, language: str = 'ru'):
