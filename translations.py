@@ -104,6 +104,10 @@ TRANSLATIONS = {
         'select_category_action': "Выбери действие с категориями:",
         'enter_topic_name': "Напиши название темы, которую хочешь добавить! 😊",
 
+        'streak_info': "🔥 Ударный режим: {days} {days_word} {emoji}\n🏆 Лучший результат: {longest} {longest_word}\n",
+        'streak_reset': "😔 Стрик сброшен! Ты пропустил день. Начинаем с 1 дня!",
+
+
         # Выбор часового пояса
         'choose_timezone': "⏰ Выбери часовой пояс или введи его вручную (например, 'Europe/Moscow' или 'UTC+8'):",
         'timezone_set': "✅ Часовой пояс {timezone} сохранен! 😺",
@@ -343,6 +347,9 @@ In a week you'll be surprised how much you've remembered without effort.
         'cancel': "Cancel",
         'back': "Back",
 
+        'streak_info': "🔥 Streak: {days} {days_word} {emoji}\n🏆 Longest streak: {longest} {longest_word}\n",
+        'streak_reset': "😔 Streak reset! You missed a day. Starting from 1 day!",
+
         'status_completed': "Completed",
         'status_overdue': "Overdue",
         'progress_error': "Oops, something went wrong while displaying progress! 😿 Try again or use /reset.",
@@ -552,6 +559,10 @@ En una semana te sorprenderás de cuánto has recordado sin esfuerzo.
         'main_keyboard': ["Mi Progreso", "Añadir Tema", "Eliminar Tema", "Restaurar Tema", "Categorías"],
         'cancel': "Cancelar",
         'back': "Atrás",
+
+        'streak_info': "🔥 Racha: {days} días {emoji}\n🏆 Mejor racha: {longest} días\n",
+        'streak_reset': "😔 ¡Racha reiniciada! Te perdiste un día. ¡Comenzando desde 1 día!",
+
         'status_completed': "Completado",
         'status_overdue': "Vencido",
         'progress_error': "¡Vaya, algo salió mal al mostrar el progreso! 😿 Intenta de nuevo o usa /reset.",
@@ -738,6 +749,9 @@ En una semana te sorprenderás de cuánto has recordado sin esfuerzo.
         'other_manual_button': "其他（手动输入）",
         'main_keyboard': ["我的进度", "添加主题", "删除主题", "恢复主题", "分类"],
         'cancel': "取消",
+        'streak_info': "🔥 连续学习: {days} 天 {emoji}\n🏆 最高记录: {longest} 天\n",
+        'streak_reset': "😔 连续学习已重置！你错过了一天。从 1 天重新开始！",
+
         'back': "返回",
         'status_completed': "已完成",
         'status_overdue': "已过期",
@@ -926,6 +940,8 @@ In einer Woche wirst du erstaunt sein, wie viel du mühelos behalten hast.
         'main_keyboard': ["Mein Fortschritt", "Thema hinzufügen", "Thema löschen", "Thema wiederherstellen",
                           "Kategorien"],
         'cancel': "Abbrechen",
+        'streak_info': "🔥 Serie: {days} Tage {emoji}\n🏆 Beste Serie: {longest} Tage\n",
+        'streak_reset': "😔 Serie zurückgesetzt! Du hast einen Tag verpasst. Beginne mit 1 Tag!",
         'back': "Zurück",
         'status_completed': "Abgeschlossen",
         'status_overdue': "Überfällig",
@@ -1115,6 +1131,8 @@ Dans une semaine, vous serez surpris de combien vous avez retenu sans effort.
                           "Catégories"],
         'cancel': "Annuler",
         'back': "Retour",
+        'streak_info': "🔥 Série: {days} jours {emoji}\n🏆 Meilleure série: {longest} jours\n",
+        'streak_reset': "😔 Série réinitialisée ! Tu as manqué un jour. On recommence à 1 jour !",
         'status_completed': "Terminé",
         'status_overdue': "En retard",
         'progress_error': "Oups, quelque chose s'est mal passé en affichant la progression ! 😿 Réessayez ou utilisez /reset.",
@@ -1640,3 +1658,28 @@ def get_main_keyboard(lang: str = 'ru') -> ReplyKeyboardMarkup:
         [buttons[:2], buttons[2:4], [buttons[4]]],
         resize_keyboard=True
     )
+
+
+# В translations.py добавляем функцию:
+# В translations.py, в самый конец файла (после всех функций), добавляем:
+
+def get_streak_emoji(streak_days: int) -> str:
+    """Получить смайлик в зависимости от длины стрика"""
+    if streak_days <= 0:
+        return "😴"  # Нет активности
+
+    # Настраиваемые уровни стриков
+    if streak_days >= 100:
+        return "🏆"  # Легенда
+    elif streak_days >= 60:
+        return "👑"  # Король
+    elif streak_days >= 30:
+        return "🔥"  # Огонь
+    elif streak_days >= 14:
+        return "⭐"  # Звезда
+    elif streak_days >= 7:
+        return "⚡"  # Молния
+    elif streak_days >= 3:
+        return "😊"  # Улыбка
+    else:
+        return ""  # Первые 2 дня без смайлика

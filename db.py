@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, UniqueConstraint, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import QueuePool
@@ -86,6 +86,14 @@ class UserReactivation(Base):
     is_active = Column(Boolean, default=True)  # Отправлять ли еще напоминания
 
 
+class UserStreak(Base):
+    __tablename__ = 'user_streaks'
+    user_id = Column(Integer, ForeignKey('users.user_id'), primary_key=True)
+    current_streak = Column(Integer, default=0)  # Текущий стрик в днях
+    longest_streak = Column(Integer, default=0)  # Рекордный стрик
+    last_activity_date = Column(Date)  # Дата последней активности
+
+
 class Database:
     def __init__(self):
         self.engine = create_engine(
@@ -128,6 +136,97 @@ class Database:
             session.rollback()
             logger.error(f"Error deleting reminder {reminder_id}: {str(e)}")
             raise
+        finally:
+            session.close()
+
+    # В класс Database добавляем методы для работы со стриками:
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def update_streak(self, user_id):
+        """Обновляет стрик активности пользователя"""
+        session = self.Session()
+        try:
+            today = datetime.utcnow().date()
+            streak = session.query(UserStreak).filter_by(user_id=user_id).first()
+
+            if not streak:
+                # Первая активность пользователя - создаём запись
+                streak = UserStreak(
+                    user_id=user_id,
+                    current_streak=1,
+                    longest_streak=1,
+                    last_activity_date=today
+                )
+                session.add(streak)
+                session.commit()
+                return 1
+
+            # Проверяем, был ли пользователь активен вчера
+            yesterday = today - timedelta(days=1)
+
+            if streak.last_activity_date == today:
+                # Уже обновляли сегодня - возвращаем текущий стрик
+                return streak.current_streak
+
+            elif streak.last_activity_date == yesterday:
+                # Активен вчера - увеличиваем стрик
+                streak.current_streak += 1
+                streak.last_activity_date = today
+
+                # Обновляем рекорд если нужно
+                if streak.current_streak > streak.longest_streak:
+                    streak.longest_streak = streak.current_streak
+
+            else:
+                # Пропустил день(-и) - сбрасываем стрик
+                streak.current_streak = 1
+                streak.last_activity_date = today
+
+            session.commit()
+            return streak.current_streak
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating streak for user {user_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(OperationalError),
+        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
+    )
+    def get_streak(self, user_id):
+        """Получает информацию о стрике пользователя"""
+        session = self.Session()
+        try:
+            streak = session.query(UserStreak).filter_by(user_id=user_id).first()
+            if not streak:
+                return 0, 0
+
+            # Автоматическая проверка сброса стрика при получении
+            today = datetime.utcnow().date()
+            yesterday = today - timedelta(days=1)
+
+            if streak.last_activity_date < yesterday:
+                # Пропустил день - сбрасываем
+                streak.current_streak = 1
+                streak.last_activity_date = today
+                session.commit()
+
+            return streak.current_streak, streak.longest_streak
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error getting streak for user {user_id}: {str(e)}")
+            return 0, 0
         finally:
             session.close()
 
@@ -839,6 +938,8 @@ class Database:
         finally:
             session.close()
 
+    # В методе update_user_activity добавляем обновление стрика:
+    # Находим существующий метод update_user_activity и заменяем его полностью:
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(3),
         wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
@@ -846,24 +947,27 @@ class Database:
         before_sleep=tenacity.before_sleep_log(logger, logging.WARNING)
     )
     def update_user_activity(self, user_id):
-        """Обновляет время последней активности пользователя"""
+        """Обновляет время последней активности пользователя и стрик"""
         session = self.Session()
         try:
-            # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ПОЛЬЗОВАТЕЛЯ ПРЕЖДЕ ЧЕМ ОБНОВЛЯТЬ АКТИВНОСТЬ
+            # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ПОЛЬЗОВАТЕЛЯ
             user = session.query(User).filter_by(user_id=user_id).first()
             if not user:
-                logger.debug(f"User {user_id} not found in users table, skipping activity update")
+                logger.debug(f"User {user_id} not found in users table")
                 return
 
             now_utc = datetime.utcnow()
+
+            # ОБНОВЛЯЕМ СТРИК АКТИВНОСТИ
+            current_streak = self.update_streak(user_id)  # Получаем текущий стрик
+
+            # Существующая логика реактивации
             reactivation = session.query(UserReactivation).filter_by(user_id=user_id).first()
             if reactivation:
                 reactivation.last_activity = now_utc
-                # ВАЖНО: Сбрасываем стадию И возвращаем is_active в true при любой активности
                 if reactivation.reactivation_stage > 0:
                     reactivation.reactivation_stage = 0
                     reactivation.last_reactivation_sent = None
-                # ВОЗВРАЩАЕМ is_active в true при любой активности
                 reactivation.is_active = True
             else:
                 reactivation = UserReactivation(
@@ -872,8 +976,10 @@ class Database:
                     is_active=True
                 )
                 session.add(reactivation)
+
             session.commit()
-            logger.debug(f"Updated user activity for {user_id}")
+            logger.debug(f"Updated user activity for {user_id}, streak: {current_streak}")
+
         except Exception as e:
             session.rollback()
             logger.error(f"Error updating user activity for {user_id}: {str(e)}")

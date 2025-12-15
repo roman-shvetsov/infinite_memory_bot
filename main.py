@@ -4,7 +4,7 @@ import re
 import signal
 import time
 from typing import Optional
-from translations import get_text, get_main_keyboard, get_kex_message, TRANSLATIONS
+from translations import get_text, get_main_keyboard, get_kex_message, TRANSLATIONS, get_streak_emoji
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -25,6 +25,29 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import Database, UserReactivation
 import asyncio
 from dotenv import load_dotenv
+
+
+def get_day_word(days: int, language: str = 'ru') -> str:
+    """Возвращает правильно склоненное слово 'день/дня/дней' или эквивалент на других языках"""
+    if language == 'ru':
+        if days % 10 == 1 and days % 100 != 11:
+            return "день"
+        elif 2 <= days % 10 <= 4 and not (12 <= days % 100 <= 14):
+            return "дня"
+        else:
+            return "дней"
+    elif language == 'en':
+        return "day" if days == 1 else "days"
+    elif language == 'es':
+        return "día" if days == 1 else "días"
+    elif language == 'de':
+        return "Tag" if days == 1 else "Tage"
+    elif language == 'fr':
+        return "jour" if days == 1 else "jours"
+    elif language == 'zh':
+        return "天"  # В китайском не склоняется
+    else:
+        return "days"  # fallback
 
 
 def setup_logging():
@@ -484,7 +507,17 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
         )
         return
 
-    # Получаем общее количество активных тем для информации о лимите
+    # Получаем стрик пользователя
+    current_streak, longest_streak = db.get_streak(user_id)
+
+    # Получаем смайлик для стрика
+    streak_emoji = get_streak_emoji(current_streak)
+
+    # Получаем правильно склоненные слова для дней
+    current_days_word = get_day_word(current_streak, language)
+    longest_days_word = get_day_word(longest_streak, language)
+
+    # Получаем общее количество активных тем
     all_active_topics = db.get_active_topics(user_id, user.timezone, category_id='all')
 
     categories = db.get_categories(user_id)
@@ -495,16 +528,33 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
     keyboard.append([InlineKeyboardButton(get_text('no_category', language), callback_data="category_progress:none")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Используем get_text для всего текста
-    text = get_text('active_topics_count', language, current=len(all_active_topics), max=MAX_ACTIVE_TOPICS)
-    if not text:
-        text = f"📊 Активных тем: {len(all_active_topics)}/{MAX_ACTIVE_TOPICS}\n"
+    # Собираем текст с информацией о стрике
+    streak_text = get_text('streak_info', language,
+                           days=current_streak,
+                           days_word=current_days_word,
+                           emoji=streak_emoji,
+                           longest=longest_streak,
+                           longest_word=longest_days_word)
+
+    if not streak_text:
+        # Fallback если перевод не найден
+        streak_text = f"🔥 Ударный режим: {current_streak} {current_days_word} {streak_emoji}\n"
+        if longest_streak > current_streak:
+            streak_text += f"🏆 Лучший результат: {longest_streak} {longest_days_word}\n"
+
+    # Текст с активными темами
+    topics_text = get_text('active_topics_count', language,
+                           current=len(all_active_topics),
+                           max=MAX_ACTIVE_TOPICS)
+
+    if not topics_text:
+        topics_text = f"📊 Активных тем: {len(all_active_topics)}/{MAX_ACTIVE_TOPICS}\n"
 
     select_text = get_text('select_category_for_progress', language)
     if not select_text:
         select_text = "Выбери категорию для просмотра прогресса:"
 
-    text += select_text
+    text = f"{streak_text}\n{topics_text}\n{select_text}"
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -517,7 +567,7 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
             reply_markup=reply_markup
         )
     context.user_data["state"] = "awaiting_category_progress"
-    logger.debug(f"User {user_id} requested progress, showing category selection")
+    logger.debug(f"User {user_id} requested progress, streak: {current_streak} {current_days_word}")
 
 
 async def show_category_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: Optional[int],
